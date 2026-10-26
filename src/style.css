@@ -1,0 +1,127 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-900 text-slate-100 antialiased;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
+    'Segoe UI', Roboto, sans-serif;
+}
+
+@layer components {
+  .card {
+    @apply bg-ink-700 border border-ink-500 rounded-2xl p-4;
+  }
+  .card-sm {
+    @apply bg-ink-700 border border-ink-500 rounded-2xl p-3;
+  }
+  .ct {
+    @apply flex items-center gap-2 mb-3;
+  }
+  .ct h3 {
+    @apply text-sm font-semibold;
+  }
+  .tag {
+    @apply text-[10px] px-2 py-0.5 rounded-md bg-ink-600 text-slate-400 border border-ink-500;
+  }
+  .more {
+    @apply ml-auto text-[11px] text-slate-500 cursor-pointer;
+  }
+
+  .ball {
+    @apply w-8 h-8 rounded-full grid place-items-center text-[13px] font-bold text-white shrink-0;
+    font-variant-numeric: tabular-nums;
+  }
+  .ball-r {
+    background: radial-gradient(circle at 32% 28%, #ff7a7c, #c9303a);
+    box-shadow: 0 3px 9px rgba(201, 48, 58, 0.4);
+  }
+  .ball-b {
+    background: radial-gradient(circle at 32% 28%, #7ab4ff, #2a5fb8);
+    box-shadow: 0 3px 9px rgba(42, 95, 184, 0.4);
+  }
+  .ball-sm {
+    @apply w-6 h-6 text-[11px];
+  }
+  /* 极小号：逐期明细里一屏要塞下几十个号码 */
+  .ball-xs {
+    @apply w-[18px] h-[18px] text-[9.5px] font-bold;
+  }
+
+  /* 逐期明细的三态号码球：命中 / 买下但没中 / 未买 */
+  .pick-hit {
+    background: radial-gradient(circle at 32% 28%, #ffd479, #f0932b);
+    box-shadow: 0 0 0 2px rgba(255, 212, 121, 0.55), 0 2px 8px rgba(240, 147, 43, 0.5);
+    color: #2b1a00;
+  }
+  .pick-miss {
+    @apply text-slate-500;
+    background: #232833;
+    box-shadow: inset 0 0 0 1px #333a47;
+  }
+  /* 命中但这一注用不上（胆拖超出 need 的拖码）：与「完全没中」必须区分开 */
+  .pick-extra {
+    @apply text-slate-400;
+    background: #2b3140;
+    box-shadow: inset 0 0 0 1px #6b7488;
+  }
+
+  .btn {
+    @apply w-full py-3 rounded-xl text-[14px] font-semibold text-white;
+    background: linear-gradient(135deg, #ff5b5e, #e0313c);
+    box-shadow: 0 5px 16px rgba(224, 49, 60, 0.3);
+  }
+  .btn:active {
+    transform: scale(0.985);
+  }
+  .btn-ghost {
+    @apply w-full py-2.5 rounded-xl text-[13px] border border-ink-500 bg-ink-600 text-slate-300;
+    box-shadow: none;
+    background: #1e232c;
+  }
+
+  .kpi {
+    @apply bg-ink-700 border border-ink-500 rounded-xl p-2.5;
+  }
+  .kpi p {
+    @apply text-[10px] text-slate-500 mb-1;
+  }
+  .kpi b {
+    @apply text-[17px] block leading-tight;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pt {
+    @apply w-full border-collapse text-[11.5px];
+  }
+  .pt th {
+    @apply text-left py-1.5 px-1 text-slate-500 font-normal text-[10.5px] border-b border-ink-500;
+  }
+  .pt td {
+    @apply py-1.5 px-1 border-b border-ink-500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .disc {
+    @apply text-[10px] text-slate-500 leading-relaxed p-3 bg-ink-700 border border-dashed border-ink-500 rounded-xl;
+  }
+}
+
+/* 隐藏滚动条但保留滚动 */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}

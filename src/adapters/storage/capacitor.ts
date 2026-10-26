@@ -1,0 +1,184 @@
+/**
+ * Capacitor 端 SQLite 存储桥（安卓 WebView）。
+ *
+ * 与 Tauri 端共用 adapters/storage/schema.ts 里的同一份 SQL，
+ * 差异只在驱动方式——这里是 @capacitor-community/sqlite 插件实例。
+ *
+ * 插件未安装或未完成 npm/i 时 isAvailable() 返回 false，
+ * index.ts 自动降级到 IndexedDB，网页端行为不受影响。
+ */
+import type { RunMeta, SummaryRow, UserState } from './types'
+import type { Draw, LotteryType } from '../../types'
+
+const DB_NAME = 'lottery_playground'
+
+let connPromise: Promise<any> | null = null
+
+async function conn(): Promise<any> {
+  if (!connPromise) {
+    connPromise = (async () => {
+      const { CapacitorSQLite, SQLiteConnection } = await import(
+        '@capacitor-community/sqlite'
+      )
+      const sqlite = new SQLiteConnection(CapacitorSQLite)
+      const c = await sqlite.createConnection(DB_NAME, false, 'no-encryption', 1, false)
+      await c.open()
+      return c
+    })()
+  }
+  return connPromise
+}
+
+async function query<T = any>(sql: string, values: any[] = []): Promise<T[]> {
+  const c = await conn()
+  const res = await c.query(sql, values)
+  return (res?.values || []) as T[]
+}
+
+async function execute(sql: string, values: any[] = []): Promise<void> {
+  const c = await conn()
+  await c.run(sql, values)
+}
+
+export async function isAvailable(): Promise<boolean> {
+  try {
+    await conn()
+    return true
+  } catch {
+    return false
+  }
+}
+
+const toDraw = (r: any): Draw => ({
+  lottery: r.lottery,
+  issue: r.issue,
+  date: r.date,
+  front: String(r.front).split(',').map(Number),
+  back: String(r.back).split(',').map(Number),
+  pool: r.pool,
+  sales: r.sales,
+  prizes: r.prizes ? JSON.parse(r.prizes) : undefined,
+  source: r.source,
+})
+
+export const capacitorAdapter = {
+  async getDraws(lottery: LotteryType): Promise<Draw[]> {
+    return query<Draw>(
+      'SELECT * FROM draws WHERE lottery = ? ORDER BY issue',
+      [lottery]
+    ).then((rs) => rs.map(toDraw))
+  },
+
+  async upsertDraws(draws: Draw[]): Promise<number> {
+    let added = 0
+    for (const d of draws) {
+      const [row] = await query(
+        'SELECT 1 AS hit FROM draws WHERE lottery = ? AND issue = ?',
+        [d.lottery, d.issue]
+      )
+      if (row) continue
+      await execute(
+        `INSERT INTO draws (lottery, issue, date, front, back, pool, sales, prizes, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          d.lottery, d.issue, d.date ?? null, d.front.join(','), d.back.join(','),
+          d.pool ?? null, d.sales ?? null,
+          d.prizes ? JSON.stringify(d.prizes) : null, d.source ?? null,
+        ]
+      )
+      added++
+    }
+    return added
+  },
+
+  countDraws(lottery: LotteryType): Promise<number> {
+    return query<{ n: number }>('SELECT COUNT(*) AS n FROM draws WHERE lottery = ?', [lottery])
+      .then((rs) => rs[0]?.n ?? 0)
+  },
+
+  putRun(meta: RunMeta): Promise<void> {
+    return execute(
+      `INSERT INTO runs (run_key, lottery, budget, sample, periods, model_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(run_key) DO UPDATE SET
+         periods = excluded.periods, model_count = excluded.model_count,
+         created_at = excluded.created_at`,
+      [meta.runKey, meta.lottery, meta.budget, meta.sample,
+       meta.periods, meta.modelCount, meta.createdAt]
+    )
+  },
+
+  getRun(runKey: string): Promise<RunMeta | null> {
+    return query<RunMeta>('SELECT * FROM runs WHERE run_key = ?', [runKey])
+      .then((rs) => rs[0] ?? null)
+  },
+
+  listRuns(lottery?: LotteryType): Promise<RunMeta[]> {
+    return lottery
+      ? query<RunMeta>('SELECT * FROM runs WHERE lottery = ? ORDER BY created_at DESC', [lottery])
+      : query<RunMeta>('SELECT * FROM runs ORDER BY created_at DESC')
+  },
+
+  deleteRun(runKey: string): Promise<void> {
+    return execute('DELETE FROM runs WHERE run_key = ?', [runKey]).then(() =>
+      execute('DELETE FROM summary WHERE run_key = ?', [runKey])
+    )
+  },
+
+  async putSummary(rows: SummaryRow[]): Promise<void> {
+    const runKeys = [...new Set(rows.map((r) => r.runKey))]
+    for (const k of runKeys) await execute('DELETE FROM summary WHERE run_key = ?', [k])
+    for (const r of rows) {
+      await execute(
+        `INSERT INTO summary (run_key, model_id, model_name, category, trials,
+           total_cost, total_prize, roi, win_rate, best_level, hits, equity)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [r.runKey, r.modelId, r.modelName, r.category, r.trials, r.totalCost,
+         r.totalPrize, r.roi, r.winRate, r.bestLevel,
+         JSON.stringify(r.hits || {}), JSON.stringify(r.equity || [])]
+      )
+    }
+  },
+
+  getSummary(runKey: string): Promise<SummaryRow[]> {
+    return query<any>('SELECT * FROM summary WHERE run_key = ? ORDER BY roi DESC', [runKey])
+      .then((rs) =>
+        rs.map((r) => ({
+          ...r,
+          hits: r.hits ? JSON.parse(r.hits) : {},
+          equity: r.equity ? JSON.parse(r.equity) : [],
+        }))
+      )
+  },
+
+  getUserState(): Promise<UserState> {
+    return query<{ v: string }>("SELECT v FROM kv WHERE k = 'user_state'", [])
+      .then((rs) => (rs[0] ? JSON.parse(rs[0].v) : ({} as UserState)))
+  },
+
+  putUserState(state: UserState): Promise<void> {
+    return execute("INSERT INTO kv (k, v) VALUES ('user_state', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", [
+      JSON.stringify(state),
+    ])
+  },
+
+  getKV<T>(k: string): Promise<T | null> {
+    return query<{ v: string }>('SELECT v FROM kv WHERE k = ?', [k]).then((rs) =>
+      rs[0]?.v ? (JSON.parse(rs[0].v) as T) : null
+    )
+  },
+
+  putKV<T>(k: string, v: T): Promise<void> {
+    return execute('INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v', [
+      k,
+      JSON.stringify(v),
+    ])
+  },
+
+  async clearAll(): Promise<void> {
+    await execute('DELETE FROM draws')
+    await execute('DELETE FROM runs')
+    await execute('DELETE FROM summary')
+    await execute('DELETE FROM kv')
+  },
+}

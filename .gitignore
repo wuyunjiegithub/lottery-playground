@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+
+# 构建缓存
+dist/
+dist-single/
+*.tsbuildinfo
+.vite/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Android
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/app/src/main/assets/public/
+capacitor-cordova-android-plugins/
+
+# 系统
+.DS_Store
+Thumbs.db
+*.log
+
+# 临时
+/tmp/
+
+# 编辑器 / 本地工具
+.vscode/
+.idea/
+.workbuddy/

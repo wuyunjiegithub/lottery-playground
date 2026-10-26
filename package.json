@@ -1,0 +1,69 @@
+{
+  "name": "lottery-playground",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "双色球 / 大乐透 概率游乐场 · 单机版",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wuyunjiegithub/lottery-playground.git"
+  },
+  "homepage": "https://github.com/wuyunjiegithub/lottery-playground#readme",
+  "bugs": {
+    "url": "https://github.com/wuyunjiegithub/lottery-playground/issues"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:single": "vite build --config vite.config.single.ts",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "verify": "node scripts/verify.mjs && node scripts/verify-idb.mjs",
+    "smoke": "node scripts/smoke-runtime.mjs",
+    "smoke:browser": "node scripts/smoke-browser.mjs",
+    "probe:detail:store": "node scripts/probe-detail-store.mjs",
+    "probe:detail:ui": "node scripts/probe-detail-ui.mjs",
+    "probe:scale": "node scripts/probe-scale.mjs",
+    "probe:trainlen": "node scripts/probe-trainlen.mjs",
+    "probe:allmodels": "node scripts/probe-allmodels.mjs",
+    "probe:slice:heavy": "node scripts/probe-slice-heavy.mjs",
+    "probe:combo": "node scripts/probe-combo-omission.mjs && node scripts/probe-combo-real.mjs",
+    "probe:combo:ui": "node scripts/probe-combo-ui.mjs",
+    "probe:plans": "node scripts/probe-detail-plans.mjs && node scripts/probe-plan-expect.mjs",
+    "probe:plans:ui": "node scripts/probe-detail-plans-ui.mjs",
+    "probe:perf": "node scripts/probe-perf-curve.mjs",
+    "probe:info:ui": "node scripts/probe-info-quality-ui.mjs",
+    "probe:persist:ui": "node scripts/probe-persist-ui.mjs",
+    "cap:add": "npx cap add android",
+    "cap:sync": "npm run build && npx cap sync android",
+    "cap:open": "npm run build && npx cap sync android && npx cap open android",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "desktop:win": "tauri build --target x86_64-pc-windows-gnu"
+  },
+  "dependencies": {
+    "@capacitor-community/sqlite": "^7.0.3",
+    "@capacitor/android": "^7.6.9",
+    "@capacitor/core": "^7.0.0",
+    "@tauri-apps/api": "^2.12.0",
+    "@tauri-apps/plugin-sql": "^2.5.0",
+    "echarts": "^5.5.1",
+    "pinia": "^2.3.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0",
+    "@tauri-apps/cli": "^2.12.0",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "autoprefixer": "^10.4.20",
+    "fake-indexeddb": "^6.2.5",
+    "playwright": "^1.63.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.6.3",
+    "vite": "^6.0.7",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vue-tsc": "^2.1.10"
+  }
+}

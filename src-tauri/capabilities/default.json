@@ -1,0 +1,12 @@
+{
+  "identifier": "default",
+  "description": "主窗口默认权限：仅需核心能力，网络请求由自定义命令发起",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "sql:default",
+    "sql:allow-load",
+    "sql:allow-execute",
+    "sql:allow-select"
+  ]
+}
