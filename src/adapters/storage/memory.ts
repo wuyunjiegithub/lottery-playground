@@ -10,6 +10,7 @@
 import type { Draw, LotteryType } from '../../types'
 import {
   DEFAULT_USER_STATE,
+  type DetailCache,
   type StorageAdapter,
   type RunMeta,
   type SummaryRow,
@@ -20,6 +21,7 @@ export function createMemoryAdapter(): StorageAdapter {
   const draws = new Map<string, Draw>()
   const runs = new Map<string, RunMeta>()
   const summary = new Map<string, SummaryRow>()
+  const details = new Map<string, DetailCache>()
   const kv = new Map<string, unknown>()
   let user: UserState = { ...DEFAULT_USER_STATE }
 
@@ -71,6 +73,9 @@ export function createMemoryAdapter(): StorageAdapter {
       for (const k of [...summary.keys()]) {
         if (k.startsWith(`${runKey}:`)) summary.delete(k)
       }
+      for (const k of [...details.keys()]) {
+        if (k.startsWith(`${runKey}:`)) details.delete(k)
+      }
     },
 
     async putSummary(rows: SummaryRow[]): Promise<void> {
@@ -85,6 +90,14 @@ export function createMemoryAdapter(): StorageAdapter {
       return [...summary.values()]
         .filter((r) => r.runKey === runKey)
         .sort((a, b) => (b.roi ?? 0) - (a.roi ?? 0))
+    },
+
+    async getDetail(runKey: string, modelId: string): Promise<DetailCache | null> {
+      return details.get(skey(runKey, modelId)) || null
+    },
+
+    async putDetail(detail: DetailCache): Promise<void> {
+      details.set(skey(detail.runKey, detail.modelId), detail)
     },
 
     async getUserState(): Promise<UserState> {
@@ -107,6 +120,7 @@ export function createMemoryAdapter(): StorageAdapter {
       draws.clear()
       runs.clear()
       summary.clear()
+      details.clear()
       kv.clear()
       user = { ...DEFAULT_USER_STATE }
     },

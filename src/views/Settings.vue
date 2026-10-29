@@ -39,7 +39,13 @@
 
     <div class="card mb-3">
       <div class="ct"><h3>每期预算</h3><span class="tag">在档案里统一设置</span></div>
-      <div class="grid grid-cols-5 gap-1.5 mb-3">
+      <!--
+        预算档位固定 7 列。
+        之前用 grid-cols-5，7 个档位除不尽 -> 第一行 5 个、第二行 2 个，右边空一大块；
+        改成 flex-grow 又会让两行的列宽不一致（4 个一行 vs 3 个一行），竖着也对不齐。
+        固定 7 列 = 永远一行，且每一列的宽度在任何断点下都相同。
+      -->
+      <div class="grid grid-cols-7 gap-1.5 mb-3">
         <button
           v-for="b in BUDGETS"
           :key="b"
@@ -62,7 +68,7 @@
           type="number"
           min="2"
           step="2"
-          class="flex-1 bg-ink-600 border border-ink-500 rounded-lg px-2 py-1.5 text-center text-[13px] text-slate-100 outline-none focus:border-red-500"
+          class="w-[120px] shrink-0 bg-ink-600 border border-ink-500 rounded-lg px-2 py-1.5 text-center text-[13px] text-slate-100 outline-none focus:border-red-500"
           @change="clampBudget"
         />
         <span class="text-[12px] text-slate-400 shrink-0">元 / 期</span>
@@ -104,7 +110,7 @@ import { budgetFit } from '../core/ticket'
 import { RULES } from '../core/lottery'
 
 const store = useMainStore()
-const BUDGETS = [10, 30, 50, 100, 200]
+const BUDGETS = [10, 30, 50, 100, 200, 300, 500]
 /** as const：让 g.k 是 'm' | 'f' 而不是 string，直接赋给 profile.gender 才过得了类型 */
 const GENDERS = [
   { k: 'm', t: '男' },

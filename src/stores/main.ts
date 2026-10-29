@@ -1,7 +1,18 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch, toRaw } from 'vue'
 import type { Draw, LotteryType, Prediction } from '../types'
-import { loadPacket, fetchLatest, mergeDraws, canFetchLive, detectNetMode, modeLabel } from '../adapters/net'
+import {
+  loadPacket,
+  fetchLatest,
+  mergeDraws,
+  canFetchLive,
+  detectNetMode,
+  modeLabel,
+  isServerLive,
+  markServerLive,
+  refreshViaServer,
+} from '../adapters/net'
+import { runLeaderboardOnServer } from '../core/serverBacktest'
 import { getStorage, type StorageAdapter, type RunMeta, type SummaryRow } from '../adapters/storage'
 import {
   DEFAULT_USER_STATE,
@@ -93,7 +104,14 @@ export const useMainStore = defineStore('main', () => {
   /** 已就绪的存储后端。首次 getStorage() 之后再取就是同步命中缓存 */
   let storage: StorageAdapter | null = null
   async function ensureStorage(): Promise<StorageAdapter> {
-    if (!storage) storage = await getStorage()
+    if (!storage) {
+      storage = await getStorage()
+      // 后端选中之后顺手告诉网络层：有后端就等于有了可靠的更新通道
+      markServerLive(storage.kind === 'server')
+      // 探测完才能定下「能不能更新」和显示什么环境标签
+      canLive.value = canFetchLive()
+      modeText.value = modeLabel()
+    }
     return storage
   }
 
@@ -103,30 +121,84 @@ export const useMainStore = defineStore('main', () => {
       .sort((a, b) => a.issue.localeCompare(b.issue))
   )
   const latest = computed(() => history.value[history.value.length - 1] || null)
-  const nextIssue = computed(() => {
-    if (!latest.value) return '—'
-    const n = Number(latest.value.issue) + 1
-    return String(n).padStart(latest.value.issue.length, '0')
-  })
   const nextDate = computed(() => nextDrawDate(lottery.value))
+
+  /**
+   * 推算下一期期号。
+   *
+   * 期号是「年份 + 3 位年内序号」：双色球 7 位（2026151），大乐透 5 位（26151）。
+   * 原先直接 Number(issue) + 1，跨年会算出一条根本不存在的期号 ——
+   * 双色球年末最后一期 2026151 会被推成 2026152，而真实下一期是 2027001。
+   *
+   * 判断依据不用猜「这一年一共几期」，而是看下一场开奖日落在哪一年：
+   * 日期和期号年份不一致，就说明新年第一期，序号从 001 起。
+   */
+  const nextIssue = computed(() => {
+    const cur = latest.value
+    if (!cur) return '—'
+    const issue = cur.issue
+    const yearLen = issue.length - 3
+    if (yearLen <= 0) return String(Number(issue) + 1)
+    const yearPrefix = issue.slice(0, yearLen)
+    const seq = issue.slice(yearLen)
+
+    const nd = nextDate.value
+    const ndYear = yearLen === 4 ? nd.getFullYear() : nd.getFullYear() % 100
+    const ndPrefix = String(ndYear).padStart(yearLen, '0')
+    if (ndPrefix !== yearPrefix) return ndPrefix + '001'
+    return yearPrefix + String(Number(seq) + 1).padStart(3, '0')
+  })
+
   const rule = computed(() => RULES[lottery.value])
 
   const selectedModel = computed(() => getModel(selectedModelId.value) || ALL_MODELS[0])
 
   // 运行环境：桌面端 / 移动端可直连官方接口，网页版只能读数据包
   const netMode = detectNetMode()
-  const canLive = canFetchLive()
-  const modeText = modeLabel()
+  /**
+   * 「能否更新」和「运行环境标签」都必须是 ref，不能是 setup 期算一次的常量。
+   *
+   * 后端是**异步**探测的：setup 阶段调 canFetchLive() 时它还不知道后端在不在，
+   * 在 dev 下会侥幸因为 dev 代理返回 true，但生产构建里就是 false ——
+   * 于是「更新数据」按钮直接被判不可用，服务端那条通路永远走不到。
+   * 探测完成后在 ensureStorage 里刷新这两个值。
+   */
+  const canLive = ref(canFetchLive())
+  const modeText = ref(modeLabel())
   const updating = ref(false)
   const updateMsg = ref('')
 
-  /** 拉取最新一期数据（仅桌面端与移动端可用） */
+  /** 拉取最新一期数据（桌面端 / 安卓可用；网页版仅在 dev 代理下可用） */
   async function updateData(): Promise<{ ok: boolean; added: number; msg: string }> {
     if (!canLive) {
-      return { ok: false, added: 0, msg: '网页版受同源策略限制无法直连，请导入数据包' }
+      const msg = '网页版无法直连官方接口（CORS + Referer 双重限制），只能使用内置数据包。桌面端、安卓或 npm run dev 可以更新'
+      return { ok: false, added: 0, msg }
     }
     updating.value = true
     updateMsg.value = '正在拉取…'
+    // 有本地后端时优先走它：浏览器直连官方接口这条路本来就是被 CORS 卡死的，
+    // dev 代理只是权宜之计，服务端才是正解。
+    if (isServerLive()) {
+      try {
+        const { added } = await refreshViaServer(lottery.value)
+        // 新数据已由后端入库，这里重新拉一遍刷新内存视图。
+        // 注意必须两个彩种都读：只回读当前彩种会把另一个从 draws 里冲掉
+        // （历史页的「数据概况」就是直接数 draws 的，会瞬间变成 0）。
+        const st = await ensureStorage()
+        const merged: Draw[] = []
+        for (const key of ['ssq', 'dlt'] as LotteryType[]) {
+          merged.push(...(await st.getDraws(key)))
+        }
+        draws.value = merged
+        updateMsg.value = added > 0 ? `新增 ${added} 期` : '已是最新'
+        return { ok: true, added, msg: updateMsg.value }
+      } catch (e: any) {
+        updateMsg.value = e?.message || '后端更新失败'
+        return { ok: false, added: 0, msg: updateMsg.value }
+      } finally {
+        updating.value = false
+      }
+    }
     try {
       const incoming = await fetchLatest(lottery.value, 30)
       const { draws: merged, added } = mergeDraws(draws.value, incoming)
@@ -234,6 +306,8 @@ export const useMainStore = defineStore('main', () => {
   function fromSummary(r: SummaryRow): BacktestResult {
     const hits: Record<number, number> = {}
     for (const [k, v] of Object.entries(r.hits || {})) hits[Number(k)] = Number(v)
+    const hitsStop: Record<number, number> = {}
+    for (const [k, v] of Object.entries(r.hitsStop || {})) hitsStop[Number(k)] = Number(v)
     return {
       modelId: r.modelId,
       modelName: r.modelName,
@@ -246,6 +320,17 @@ export const useMainStore = defineStore('main', () => {
       bestLevel: r.bestLevel,
       winRate: r.winRate,
       equity: r.equity || [],
+      stopped: !!r.stopped,
+      stopIssue: r.stopIssue ?? null,
+      stopIndex: r.stopIndex ?? null,
+      stopLevel: r.stopLevel ?? null,
+      trialsStop: r.trialsStop ?? 0,
+      totalCostStop: r.totalCostStop ?? 0,
+      totalPrizeStop: r.totalPrizeStop ?? 0,
+      roiStop: r.roiStop ?? 0,
+      winRateStop: r.winRateStop ?? 0,
+      bestLevelStop: r.bestLevelStop ?? 0,
+      hitsStop,
     }
   }
 
@@ -256,6 +341,8 @@ export const useMainStore = defineStore('main', () => {
       const r = byId.get(m.meta.id)
       const hits: Record<number, number> = {}
       for (const [k, v] of Object.entries(r?.hits || {})) hits[Number(k)] = Number(v)
+      const hitsStop: Record<number, number> = {}
+      for (const [k, v] of Object.entries(r?.hitsStop || {})) hitsStop[Number(k)] = Number(v)
       return {
         modelId: m.meta.id,
         modelName: m.meta.name,
@@ -270,6 +357,19 @@ export const useMainStore = defineStore('main', () => {
             }
           : emptyTotals(),
         equity: Array.isArray(r?.equity) ? r!.equity.slice() : [],
+        stopTotals: r
+          ? {
+              trials: r.trialsStop || 0,
+              totalCost: r.totalCostStop || 0,
+              totalPrize: r.totalPrizeStop || 0,
+              hits: hitsStop,
+              bestLevel: r.bestLevelStop || 0,
+            }
+          : emptyTotals(),
+        stopped: !!r?.stopped,
+        stopIssue: r?.stopIssue ?? null,
+        stopIndex: r?.stopIndex ?? null,
+        stopLevel: r?.stopLevel ?? null,
       }
     })
   }
@@ -307,6 +407,8 @@ export const useMainStore = defineStore('main', () => {
       const st = await ensureStorage()
       const last = await st.getKV<LastBoard>(KV_LAST_BOARD)
       if (!last || last.lottery !== lottery.value) return
+      // 引擎升级过：老榜面缺字段（v3 的汇总没有收手变体），恢复出来只会是错的
+      if (last.engine !== ENGINE_VERSION) return
       const expected = ALL_MODELS.length
       if (last.modelCount !== expected) return
       const rows = await st.getSummary(last.runKey)
@@ -390,6 +492,8 @@ export const useMainStore = defineStore('main', () => {
   function publishBoard(info: LastBoard, results: BacktestResult[]) {
     boardInfo.value = info
     board.value = results
+    // 榜面一换就去问一次「明细存到第几个模型了」，只为了那句提示文案
+    void refreshArchiveInfo()
   }
 
   /**
@@ -425,6 +529,61 @@ export const useMainStore = defineStore('main', () => {
     const start = Math.max(60, total - periods)
     const runKey = makeRunKey({ lottery: lottery.value, budget: budget.value, sample })
     const models = ALL_MODELS
+
+    // 有本地后端就把重活交出去：浏览器只等进度，不占主线程
+    if (isServerLive()) {
+      backtesting.value = true
+      progress.value = { ...idleProgress(), phase: 'running', periodCount: periods, modelCount: models.length }
+      try {
+        const r = await runLeaderboardOnServer({
+          lottery: lottery.value,
+          budget: budget.value,
+          sample,
+          periods,
+          profile: profile.value,
+          runKey,
+          onProgress: (p) => {
+            progress.value = { ...progress.value, ...p, phase: 'running' }
+          },
+          shouldCancel: () => cancelFlag,
+        })
+        const info: LastBoard = {
+          runKey,
+          lottery: lottery.value,
+          budget: budget.value,
+          sample,
+          periods,
+          upTo: total,
+          modelCount: r.results.length,
+          createdAt: Date.now(),
+          durationMs: r.durationMs,
+          engine: ENGINE_VERSION,
+        }
+        publishBoard(info, r.results)
+        // 汇总行由后端自己写过了（它算的时候就直接落库），这里只补一个「上次榜面」指针，
+        // 否则刷新页面就没有可恢复的榜面，用户只能再点一次「读取缓存」。
+        void st.putKV(KV_LAST_BOARD, info).catch(() => {})
+        progress.value = {
+          ...progress.value,
+          phase: 'done',
+          ratio: 1,
+          periodsDone: periods,
+          periodCount: periods,
+        }
+        return { cached: r.cached, count: r.results.length, extended: 0 }
+      } catch (e: any) {
+        const cancelled = e?.name === 'BacktestCancelled'
+        progress.value = {
+          ...progress.value,
+          phase: cancelled ? 'cancelled' : 'error',
+          message: cancelled ? '已取消' : e?.message || '服务端回测失败',
+        }
+        return { cached: false, count: 0, extended: 0 }
+      } finally {
+        backtesting.value = false
+        cancelFlag = false
+      }
+    }
 
     const snapshot = {
       lottery: lottery.value,
@@ -602,6 +761,7 @@ export const useMainStore = defineStore('main', () => {
       modelCount: meta.modelCount,
       createdAt: meta.createdAt,
       durationMs: meta.durationMs,
+      engine: ENGINE_VERSION,
     }
   }
 
@@ -629,6 +789,17 @@ export const useMainStore = defineStore('main', () => {
       bestLevel: r.bestLevel,
       hits: r.hits,
       equity: r.equity,
+      stopped: r.stopped,
+      stopIssue: r.stopIssue ?? null,
+      stopIndex: r.stopIndex ?? null,
+      stopLevel: r.stopLevel ?? null,
+      trialsStop: r.trialsStop ?? 0,
+      totalCostStop: r.totalCostStop ?? 0,
+      totalPrizeStop: r.totalPrizeStop ?? 0,
+      roiStop: r.roiStop ?? 0,
+      winRateStop: r.winRateStop ?? 0,
+      bestLevelStop: r.bestLevelStop ?? 0,
+      hitsStop: r.hitsStop || {},
     }))
     const anchor: RunAnchor = {
       runKey: meta.runKey,
@@ -657,6 +828,43 @@ export const useMainStore = defineStore('main', () => {
     return last
   }
 
+  /**
+   * 服务端缓存探测。
+   *
+   * 浏览器直跑那条路会把锚点写进 kv（run_anchor:xxx），但服务端跑的时候是**后端自己**
+   * 落库、只留了一个 server_board:xxx（含 engine/upTo/periods）。不读它的话，
+   * 刷新一次页面后按钮永远显示「开始回测（约 1 小时）」，而实际上点下去秒开——
+   * 用户会以为要重算，直接放弃。
+   *
+   * 判定条件与后端 tryCached 保持一致：期数必须正好覆盖到最新一期。
+   * 后端不做增量（upTo 落后就全量重算），所以这里也只认「完全命中」。
+   */
+  async function serverBoardHit(
+    st: StorageAdapter,
+    runKey: string,
+    total: number,
+    periods: number
+  ): Promise<boolean> {
+    if (!isServerLive()) return false
+    try {
+      const meta = await st.getKV<{
+        upTo?: number
+        periods?: number
+        modelCount?: number
+        engine?: number
+      }>(`server_board:${runKey}`)
+      return (
+        !!meta &&
+        meta.engine === ENGINE_VERSION &&
+        meta.modelCount === ALL_MODELS.length &&
+        meta.upTo === total &&
+        meta.periods === periods
+      )
+    } catch {
+      return false
+    }
+  }
+
   /** 当前设置组合是否已有一条现成的缓存 */
   async function hasCachedBoard(periods = 80): Promise<boolean> {
     if (!history.value.length) return false
@@ -669,7 +877,8 @@ export const useMainStore = defineStore('main', () => {
     try {
       const st = await ensureStorage()
       const rows = await st.getSummary(runKey)
-      return rows.length === ALL_MODELS.length
+      if (rows.length === ALL_MODELS.length) return true
+      return await serverBoardHit(st, runKey, history.value.length, periods)
     } catch {
       return false
     }
@@ -702,6 +911,10 @@ export const useMainStore = defineStore('main', () => {
           history: history.value,
         })
       ) {
+        // 浏览器里没锚点，但后端可能已经算过这套设置（它写的是自己的 server_board）
+        if (await serverBoardHit(st, runKey, total, periods)) {
+          return { has: true, upTo: total, extend: 0, periods: Math.max(0, total - start) }
+        }
         return none
       }
       const rows = await st.getSummary(runKey)
@@ -737,15 +950,62 @@ export const useMainStore = defineStore('main', () => {
   const detailModelId = ref('')
   const detailLoading = ref(false)
   const detailProgress = ref(0)
+  /** 这批明细是哪来的：内存 / 本地库 / 本地库+补新期 / 现算。UI 据此给不同提示 */
+  const detailFrom = ref<'memory' | 'disk' | 'extend' | 'compute'>('compute')
   /** 明细加载失败的原因。**必须有**：静默失败只会让 UI 停在占位文案上，
    *  用户看到的是「点了没反应」，根本分不清是还在算、还是坏了 */
   const detailError = ref('')
   let detailCancel = false
 
+  /**
+   * 服务端的明细存档进度（回测跑完后后台补齐 78 个模型的逐期明细）。
+   * 只影响一句提示文案，拿不到就当没有——不影响明细本身的读取与现算。
+   */
+  const archiveInfo = ref<{ status: string; done: number; total: number } | null>(null)
+  let archiveTimer: ReturnType<typeof setTimeout> | null = null
+
+  function stopArchivePoll() {
+    if (archiveTimer) clearTimeout(archiveTimer)
+    archiveTimer = null
+  }
+
+  async function refreshArchiveInfo(): Promise<void> {
+    stopArchivePoll()
+    const info = boardInfo.value
+    if (!info) {
+      archiveInfo.value = null
+      return
+    }
+    try {
+      const st = await ensureStorage()
+      const v = await st.getKV<{ status: string; done: number; total: number }>(
+        `detail_archive:${info.runKey}`
+      )
+      archiveInfo.value = v || null
+      // 还在补就隔一会儿再看；done / error 之后不再打扰
+      if (v && v.status === 'running') {
+        archiveTimer = setTimeout(() => void refreshArchiveInfo(), 6000)
+      }
+    } catch {
+      archiveInfo.value = null
+    }
+  }
+
   /** 明细按模型缓存：来回切模型不用重算。key 含全部影响结果的参数 */
   const detailCache = new Map<string, PeriodDetail[]>()
+  /**
+   * 明细的落库键。
+   *
+   * 除了模型本身，还要带上「哪个批次（runKey）+ 哪段区间（start~upTo）＋ 哪版引擎」：
+   * 每多一期开奖窗口就整体后移，键里不带区间就会把上一轮的号码贴到新位置上。
+   */
   function detailKey(modelId: string): string {
-    return [lottery.value, budget.value, detailSample.value, modelId].join('|')
+    return [
+      boardInfo.value?.runKey ?? '-',
+      modelId,
+      detailStart.value,
+      detailEnd.value,
+    ].join('|')
   }
 
   /** 明细要对齐的结算区间。用 boardInfo 的 start/upTo，保证与排行榜那次同口径 */
@@ -802,6 +1062,7 @@ export const useMainStore = defineStore('main', () => {
       detailRows.value = cached
       detailModelId.value = modelId
       detailError.value = ''
+      detailFrom.value = 'memory'
       return true
     }
 
@@ -811,12 +1072,102 @@ export const useMainStore = defineStore('main', () => {
       return false
     }
 
+    const start = detailStart.value
+    const end = detailEnd.value
+
+    // 落库的那一份：引擎版本一致、且覆盖本次要看的起点就认。
+    //
+    // 为什么不再要求「区间逐位相等」：开奖每多一期，窗口就整体后移一格，
+    // 但**老的那几期的号码不会变**——种子只看 (期序号, 模型序号)，
+    // 训练集是 history.slice(0, i)，前缀没动过。所以缓存只要起点不晚于本次、
+    // 终点不超过本次，就能直接用，缺的只有末尾新开的那一两期。
+    // 按老写法（start/upTo 必须相等）每来一期新开奖，78 个模型的明细全部作废，
+    // 等于把几十 MB 的存档一次性扔掉。
+    if (!force) {
+      try {
+        const st = await ensureStorage()
+        const saved = await st.getDetail(info.runKey, modelId)
+        if (
+          saved &&
+          saved.engine === ENGINE_VERSION &&
+          saved.start <= start &&
+          saved.upTo >= start &&
+          saved.upTo <= end
+        ) {
+          const kept = saved.rows.filter((r) => r.index >= start)
+          if (saved.upTo === end) {
+            detailCache.set(key, kept)
+            detailRows.value = kept
+            detailModelId.value = modelId
+            detailError.value = ''
+            detailProgress.value = 1
+            detailFrom.value = 'disk'
+            return true
+          }
+          // 只补末尾新增的几期（通常就 1 期），补完合并回库
+          detailCancel = false
+          detailLoading.value = true
+          detailProgress.value = 0
+          detailModelId.value = modelId
+          detailError.value = ''
+          detailRows.value = kept
+          detailFrom.value = 'extend'
+          try {
+            const tail = await runDetailAsync(
+              {
+                lottery: lottery.value,
+                history: history.value,
+                budget: budget.value,
+                profile: profile.value,
+                model: m,
+                modelIndex,
+                from: saved.upTo,
+                to: end,
+              },
+              {
+                onProgress: (p) => (detailProgress.value = p.ratio),
+                shouldCancel: () => detailCancel,
+              }
+            )
+            const rows = kept.concat(tail)
+            detailCache.set(key, rows)
+            detailRows.value = rows
+            detailProgress.value = 1
+            detailLoading.value = false
+            void ensureStorage()
+              .then((s2) =>
+                s2.putDetail({
+                  runKey: info.runKey,
+                  modelId,
+                  start,
+                  upTo: end,
+                  engine: ENGINE_VERSION,
+                  rows: toRaw(rows),
+                  createdAt: Date.now(),
+                })
+              )
+              .catch(() => {
+                /* 合并写回失败也不影响这次展示 */
+              })
+            return true
+          } catch {
+            // 补尾巴失败（被停掉 / 模型报错）就退回整体现算，别把 loading 卡住
+            detailLoading.value = false
+            detailRows.value = []
+          }
+        }
+      } catch {
+        /* 读缓存失败不致命，现算就是 */
+      }
+    }
+
     detailCancel = false
     detailLoading.value = true
     detailError.value = ''
     detailProgress.value = 0
     detailModelId.value = modelId
     detailRows.value = []
+    detailFrom.value = 'compute'
     // 先让出一帧，把「正在重算」渲染出来再开算
     await new Promise((r) => setTimeout(r, 20))
     try {
@@ -828,8 +1179,8 @@ export const useMainStore = defineStore('main', () => {
           profile: profile.value,
           model: m,
           modelIndex,
-          from: detailStart.value,
-          to: detailEnd.value,
+          from: start,
+          to: end,
         },
         {
           onProgress: (p) => (detailProgress.value = p.ratio),
@@ -839,6 +1190,20 @@ export const useMainStore = defineStore('main', () => {
       detailCache.set(key, rows)
       detailRows.value = rows
       detailProgress.value = 1
+      // 落库失败不影响本次显示，但下次还得再算一遍，所以要出声
+      void ensureStorage()
+        .then((st) =>
+          st.putDetail({
+            runKey: info.runKey,
+            modelId,
+            start,
+            upTo: end,
+            engine: ENGINE_VERSION,
+            rows: toRaw(rows),
+            createdAt: Date.now(),
+          })
+        )
+        .catch((e) => console.warn('[明细] 落库失败，下次打开还要重算：', e))
       return true
     } catch (e: any) {
       if (e instanceof BacktestCancelled) {
@@ -925,8 +1290,8 @@ export const useMainStore = defineStore('main', () => {
     runLeaderboard, hasCachedBoard, probeBoard, runSingle, cancelRun, restoreLastBoard,
     recordPerfRate,
     toggleFav, persist, resetAll, updateData,
-    detailRows, detailModelId, detailLoading, detailProgress, detailError,
-    detailStart, detailEnd,
+    detailRows, detailModelId, detailLoading, detailProgress, detailError, detailFrom,
+    detailStart, detailEnd, archiveInfo,
     loadDetail, cancelDetail, clearDetail,
   }
 })

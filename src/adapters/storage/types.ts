@@ -3,14 +3,17 @@
  *
  * 设计原则对齐设计文档 5.3：业务层只认这个接口，不关心底下是 SQLite 还是 IndexedDB。
  *
- * 分工（2026-10-06 与用户确认）：
+ * 分工：
  *   - SQLite 装【原始事实】开奖历史 + 【派生产物】回测汇总，合计约 2.6 MB
- *   - 回测逐期明细（20 万条 / 21.5 MB）默认不落盘，通过导出走文件
+ *   - 逐期明细**按需落盘**（谁点开哪个模型就存哪个），见 DetailCache
  *
- * 之所以不让明细进库：它是完全可再生的——改预算重跑一遍就有；
- * 而开奖数据丢了要重新爬，两者不该享受同一级别的持久化待遇。
+ * 明细原本是完全不落盘的（一次全存是 20 万条 / 21.5 MB）。但用户实际会反复点开
+ * 同一批模型看，而重算一次要二十来秒，于是改成「懒缓存」：第一次点开照旧现算，
+ * 算完顺手写一行，下次（包括刷新页面、换标签页回来）直接读库。
+ * 单模型约 0.3~0.7 MB，只有真看过的模型才占地方，代价可以接受。
  */
 import type { Draw, LotteryType } from '../../types'
+import type { PeriodDetail } from '../../core/backtest'
 
 /** 回测批次元信息。runKey 唯一标识一次「设置组合」下的全模型回测。 */
 export interface RunMeta {
@@ -45,6 +48,43 @@ export interface SummaryRow {
    * 所以落库时必须保留（它也是「增量补算 vs 全量重算逐位一致」的校验对象）。
    */
   equity: number[]
+  // ---- 「中二等奖及以上即收手」变体：引擎一次算两套，结果区可即时切换 ----
+  /** 是否触发收手策略（即曾在某期命中二等奖及以上） */
+  stopped?: boolean
+  /** 收手时所在期号（中奖那一期）；从未中则为 null */
+  stopIssue?: string | null
+  /** 收手时的历史下标 */
+  stopIndex?: number | null
+  /** 触发收手的奖级（1=一等奖，2=二等奖） */
+  stopLevel?: number | null
+  /** 收手变体的逐期累计（只算到第一次中二等奖及以上那期） */
+  trialsStop?: number
+  totalCostStop?: number
+  totalPrizeStop?: number
+  roiStop?: number
+  winRateStop?: number
+  bestLevelStop?: number
+  hitsStop?: Record<number, number>
+}
+
+/**
+ * 某个模型某一结算区间的逐期明细缓存。
+ *
+ * 之所以带 start/upTo/engine 一起存而不是只按 (runKey, modelId) 取：
+ * 每多一期开奖，明细窗口就会整体后移，老行必须能自己证明「我还对得上」，
+ * 否则会把上一轮的号码贴到这一轮的位置上——数字看着正常，其实全是错位的。
+ */
+export interface DetailCache {
+  runKey: string
+  modelId: string
+  /** 结算起点（历史下标，含） */
+  start: number
+  /** 结算终点（历史下标，不含） */
+  upTo: number
+  /** 产出这批明细的引擎版本；与当前不符即作废 */
+  engine: number
+  rows: PeriodDetail[]
+  createdAt: number
 }
 
 export interface UserState {
@@ -60,7 +100,7 @@ export interface UserState {
   favorites: string[]
 }
 
-export type StorageKind = 'sqlite' | 'idb' | 'memory'
+export type StorageKind = 'sqlite' | 'server' | 'idb' | 'memory'
 
 export interface StorageAdapter {
   readonly kind: StorageKind
@@ -81,6 +121,12 @@ export interface StorageAdapter {
   // ------------------------------------------------------------ 回测汇总
   putSummary(rows: SummaryRow[]): Promise<void>
   getSummary(runKey: string): Promise<SummaryRow[]>
+
+  // ------------------------------------------------------------ 逐期明细（按需缓存）
+  /** 取某个模型缓存的明细；没有就返回 null（由调用方决定现算还是等） */
+  getDetail(runKey: string, modelId: string): Promise<DetailCache | null>
+  /** 写入/覆盖某个模型的明细缓存 */
+  putDetail(detail: DetailCache): Promise<void>
 
   // ------------------------------------------------------------ 用户数据
   getUserState(): Promise<UserState>
@@ -153,6 +199,14 @@ export interface LastBoard {
    * 任何简单公式都会在某个区间低估好几倍。报「上次真跑了多久」永远不会骗人。
    */
   durationMs?: number
+  /**
+   * 产出这份榜面的引擎版本。
+   *
+   * 恢复榜面时必须先比这一位：引擎一升级，库里那些行就缺了新字段
+   * （比如 v3 的汇总根本没有 stop_data），直接恢复出来就是「收手开关一开全是 0 元」。
+   * 宁可当没有缓存重新跑，也不要展示一份半截数据。
+   */
+  engine?: number
 }
 
 export const KV_RUN_ANCHOR = (runKey: string) => `run_anchor:${runKey}`

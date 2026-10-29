@@ -39,6 +39,15 @@ async function pick(): Promise<StorageAdapter> {
 
   const w = window as any
 
+  // 本地后端优先：数据落在 SQLite 里才算真存住（IndexedDB 清个缓存就没了），
+  // 而且只有服务端能直连官方接口。后端没起就静默回落到浏览器存储，功能不变。
+  try {
+    const mod = await import('./server')
+    if (await mod.isServerAvailable()) return mod.serverAdapter
+  } catch {
+    /* 后端没起，继续往下走浏览器后端 */
+  }
+
   if (w.__TAURI_INTERNALS__ || w.__TAURI__) {
     try {
       const mod = await import('./tauri')

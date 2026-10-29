@@ -10,9 +10,19 @@ import type { Draw, LotteryType } from '../types'
  * | 纯浏览器网页        | 数据包           | 不能（CORS 硬限制）|
  *
  * 上层业务只调用 fetchLatest / loadPacket，不关心自己跑在哪里。
+ *
+ * 补充（实测）：纯浏览器里有两个坑，缺一不可解决 ——
+ *   1. 官方接口要求带 Referer，而 Referer 是浏览器禁止脚本修改的请求头；
+ *   2. 福彩接口不返回任何 CORS 头；体彩虽然返回 Access-Control-Allow-Origin: *，
+ *      但请求一旦带上 Origin 就被 WAF 打回 567。
+ * 因此网页版只有在 dev server 下经 Vite 代理（服务端补 Referer + 绕开 CORS）
+ * 才能拉到实时数据；生产环境静态部署没有代理，只能读内置数据包。
  */
 
 export type NetMode = 'tauri' | 'capacitor' | 'packet'
+
+/** dev server 代理是否可用，代理配置见 vite.config.ts */
+const DEV_PROXY = import.meta.env.DEV
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -23,6 +33,10 @@ const REF_SSQ = 'https://www.cwl.gov.cn/ygkj/wqkjgg/ssq/'
 const DLT_API = 'https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry'
 const SSQ_API = 'https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice'
 
+/** dev server 代理路径，与 vite.config.ts 的 server.proxy 前缀一一对应 */
+const DLT_PROXY = '/__dlt/gateway/lottery/getHistoryPageListV1.qry'
+const SSQ_PROXY = '/__ssq/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice'
+
 /** 探测当前运行环境 */
 export function detectNetMode(): NetMode {
   if (typeof window === 'undefined') return 'packet'
@@ -32,18 +46,48 @@ export function detectNetMode(): NetMode {
   return 'packet'
 }
 
+/**
+ * 本地后端是否已接上。
+ * 由存储层探测结果回填（storage/index.ts 选中 server 后端时会调 markServerLive），
+ * 因为「后端在不在」这件事只需要判定一次，没必要在两条链路上各探一遍。
+ */
+let serverLive = false
+
+export function markServerLive(v: boolean) {
+  serverLive = v
+}
+
+export function isServerLive(): boolean {
+  return serverLive
+}
+
 /** 当前环境是否支持直连官方接口（决定能否自动更新） */
 export function canFetchLive(): boolean {
-  return detectNetMode() !== 'packet'
+  return detectNetMode() !== 'packet' || DEV_PROXY || serverLive
 }
 
 export function modeLabel(): string {
   const m = detectNetMode()
-  return m === 'tauri'
-    ? '桌面端 · 可自动更新'
-    : m === 'capacitor'
-      ? '移动端 · 可自动更新'
-      : '网页版 · 数据包模式'
+  if (m === 'tauri') return '桌面端 · 可自动更新'
+  if (m === 'capacitor') return '移动端 · 可自动更新'
+  if (serverLive) return '已接本地后端 · 可自动更新'
+  return DEV_PROXY ? '网页版 · 开发代理可更新' : '网页版 · 数据包模式'
+}
+
+/**
+ * 经本地后端刷新开奖数据。
+ *
+ * 这是网页版唯一真正可靠的更新通道：服务端没有同源策略，也不受
+ * 「带 Origin 就被 WAF 打 567」的影响，Referer 想怎么设就怎么设。
+ */
+export async function refreshViaServer(lottery: LotteryType): Promise<{ added: number }> {
+  const { serverPost } = await import('./storage/http')
+  const r = await serverPost<{ ok: boolean; added: number; msg?: string }>('/api/draws/refresh', {
+    lottery,
+    count: 60,
+  })
+  if (!r.ok) throw new Error(r.msg || '后端刷新失败')
+  return { added: r.added || 0 }
 }
 
 /** 原生层 GET：不受同源策略限制，Referer 可自定义 */
@@ -62,6 +106,33 @@ async function nativeGet(url: string, referer: string): Promise<string> {
     return typeof res.data === 'string' ? res.data : JSON.stringify(res.data)
   }
   throw new Error('当前环境无法直连官方接口，请使用数据包导入')
+}
+
+/**
+ * 网页通道。dev 下走代理（能成），生产环境直连（几乎必然失败）。
+ * 官方接口被 WAF 拦时会返回 HTML 而不是 JSON，这里显式识别，避免上层
+ * 抛出一句 "Unexpected token < in JSON" 这种看不懂的报错。
+ */
+async function webGet(url: string, proxyPath: string): Promise<string> {
+  const target = DEV_PROXY ? proxyPath : url
+  let res: Response
+  try {
+    res = await fetch(target, { headers: { Accept: 'application/json, text/plain, */*' } })
+  } catch {
+    throw new Error(
+      DEV_PROXY ? '请求被拦截，请确认 dev server 代理可用' : '浏览器拦截了跨域请求（官方接口无 CORS 头）'
+    )
+  }
+  if (!res.ok) throw new Error(`官方接口返回 HTTP ${res.status}`)
+  const text = await res.text()
+  const head = text.trim().slice(0, 1)
+  if (head !== '{' && head !== '[') throw new Error('官方接口返回风控页面，未拿到 JSON')
+  return text
+}
+
+/** 按运行环境选通道：原生走原生，网页走 webGet */
+async function getOfficial(url: string, proxyPath: string, referer: string): Promise<string> {
+  return detectNetMode() === 'packet' ? webGet(url, proxyPath) : nativeGet(url, referer)
 }
 
 // 内联数据包：随 JS 一起打包。
@@ -97,8 +168,8 @@ export async function loadPacket(url = './data/lottery-data.json'): Promise<Draw
 
 /** 抓取大乐透最新若干期 */
 export async function fetchDltLatest(count = 30): Promise<Draw[]> {
-  const url = `${DLT_API}?gameNo=85&provinceId=0&pageSize=${count}&pageNo=1&isVerify=1`
-  const body = await nativeGet(url, REF_DLT)
+  const qs = `?gameNo=85&provinceId=0&pageSize=${count}&pageNo=1&isVerify=1`
+  const body = await getOfficial(DLT_API + qs, DLT_PROXY + qs, REF_DLT)
   const json = JSON.parse(body)
   const list = json?.value?.list || []
   const out: Draw[] = []
@@ -112,7 +183,9 @@ export async function fetchDltLatest(count = 30): Promise<Draw[]> {
       front: nums.slice(0, 5).map(Number),
       back: nums.slice(5, 7).map(Number),
       pool: String(r.poolBalanceAfterdraw || '').replace(/,/g, ''),
-      sales: r.totalSaleAmount != null ? String(r.totalSaleAmount) : null,
+      // 体彩返回的销售额带千分位逗号（"289,057,331"），必须去掉，
+      // 否则上层 Number() 得到 NaN，页面显示成「—」
+      sales: r.totalSaleAmount != null ? String(r.totalSaleAmount).replace(/,/g, '') : null,
       source: 'official',
     })
   }
@@ -121,8 +194,8 @@ export async function fetchDltLatest(count = 30): Promise<Draw[]> {
 
 /** 抓取双色球最新若干期 */
 export async function fetchSsqLatest(count = 30): Promise<Draw[]> {
-  const url = `${SSQ_API}?name=ssq&pageNo=1&pageSize=${count}&systemType=PC`
-  const body = await nativeGet(url, REF_SSQ)
+  const qs = `?name=ssq&pageNo=1&pageSize=${count}&systemType=PC`
+  const body = await getOfficial(SSQ_API + qs, SSQ_PROXY + qs, REF_SSQ)
   const json = JSON.parse(body)
   const list = json?.result || []
   const out: Draw[] = []

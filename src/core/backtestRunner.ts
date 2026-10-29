@@ -14,8 +14,10 @@
  * 只补算新几期」的实现基础。
  */
 import {
+  addTotals,
   applyStep,
   emptyTotals,
+  isStopPrize,
   resolveDrawDates,
   stepPeriod,
   stepPeriodDetail,
@@ -39,8 +41,14 @@ import type { Model, Profile } from './models/types'
  *        · 缺 date 的期次不再用 Date.now()，改成沿用上一期日期（resolveDrawDates）
  *        · 随机数统一由 Math.random 提供并按 (期, 模型) 定种（withUnitRandom）
  *      这两条都会让同一套设置的数字与 v1 不同，因此必须让旧缓存失效。
+ *   3  「中二等奖及以上即收手」改为常算变体：SummaryRow 新增 trialsStop / totalCostStop /
+ *      totalPrizeStop / roiStop / winRateStop / bestLevelStop / hitsStop 等列，旧缓存缺这些列，
+ *      且 runKey 不再带 #S 维度，必须让旧缓存整体失效重算。
+ *   4  收手变体真正落库（summary.stop_data）。v3 只把两套账本算在内存里，落库时丢掉了收手那一套，
+ *      于是从缓存/服务端读回来的榜面一开收手开关全是 0 元。算法没有变，但 v3 写下的缓存里
+ *      没有可用的收手数据，且无法从已有列反推，因此必须让旧缓存失效重算一次。
  */
-export const ENGINE_VERSION = 2
+export const ENGINE_VERSION = 4
 
 /** 单模型在某个区间内的累计账本 */
 export interface ModelAccum {
@@ -49,6 +57,16 @@ export interface ModelAccum {
   category: string
   totals: RunningTotals
   equity: number[]
+  /** 收手变体的累计账本（只算到第一次中二等奖及以上那期） */
+  stopTotals: RunningTotals
+  /** 是否触发「中二等奖及以上即收手」 */
+  stopped: boolean
+  /** 收手时所在期号（中奖那一期） */
+  stopIssue: string | null
+  /** 收手时的历史下标 */
+  stopIndex: number | null
+  /** 触发收手的奖级（1=一等奖，2=二等奖） */
+  stopLevel: number | null
 }
 
 export interface RunProgress {
@@ -92,6 +110,17 @@ export interface RunnerArgs {
    * 代表 [start, from) 这段区间已经算出的累计量。不传则视为全新开跑。
    */
   base?: ModelAccum[]
+  /**
+   * 顺手把逐期明细一并产出（服务端用）。
+   *
+   * 开着它时主循环改用 stepPeriodDetail：predict 次数完全相同，
+   * 只是多摊开一下号码，所以「回测 + 明细」只花一遍时间，
+   * 不像事后重放那样把 78 个模型的 predict 再跑一次。
+   *
+   * 明细不留在内存里：每期立刻序列化成 JSON 片段攒着（约 50 MB 字符串），
+   * 循环结束再通过 onModelDetails 交给调用方落库。
+   */
+  collectDetail?: boolean
 }
 
 /**
@@ -190,6 +219,11 @@ export function makeAccums(models: Model[]): ModelAccum[] {
     category: m.meta.category,
     totals: emptyTotals(),
     equity: [],
+    stopTotals: emptyTotals(),
+    stopped: false,
+    stopIssue: null,
+    stopIndex: null,
+    stopLevel: null,
   }))
 }
 
@@ -197,7 +231,13 @@ export function makeAccums(models: Model[]): ModelAccum[] {
 export function accumsToResults(accums: ModelAccum[]): BacktestResult[] {
   return accums
     .map((a) =>
-      toResult({ id: a.modelId, name: a.modelName, category: a.category }, a.totals, a.equity)
+      toResult(
+        { id: a.modelId, name: a.modelName, category: a.category },
+        a.totals,
+        a.equity,
+        a.stopTotals,
+        { stopped: a.stopped, stopIssue: a.stopIssue, stopIndex: a.stopIndex, stopLevel: a.stopLevel }
+      )
     )
     .sort((x, y) => y.roi - x.roi)
 }
@@ -220,6 +260,8 @@ export async function runLeaderboardAsync(
   hooks: {
     onProgress?: (p: RunProgress) => void
     shouldCancel?: () => boolean
+    /** 收集明细时才会调用：rowsJson 是一整段可直接写库的 JSON 数组文本 */
+    onModelDetails?: (modelId: string, rowsJson: string) => void
   } = {}
 ): Promise<ModelAccum[]> {
   const { models, history, lottery, budget, profile, from, to } = args
@@ -234,6 +276,11 @@ export async function runLeaderboardAsync(
           category: b.category,
           totals: cloneTotals(b.totals),
           equity: b.equity.slice(),
+          stopTotals: cloneTotals(b.stopTotals),
+          stopped: b.stopped,
+          stopIssue: b.stopIssue,
+          stopIndex: b.stopIndex,
+          stopLevel: b.stopLevel,
         }))
       : makeAccums(models)
 
@@ -243,6 +290,11 @@ export async function runLeaderboardAsync(
   let rate = 0 // 单元/毫秒，指数滑动平均，用来算 ETA
   const t0 = now()
   let sliceStart = t0
+
+  // 顺手收明细时，每期算完立刻序列化，避免 15 万个对象同时挂在堆上。
+  // 段与段之间用逗号拼，最后包一层中括号即是一条完整的 JSON 数组。
+  const collect = !!args.collectDetail
+  const chunks: string[][] = collect ? models.map(() => []) : []
 
   const report = (mi: number) => {
     const el = now() - t0
@@ -271,9 +323,24 @@ export async function runLeaderboardAsync(
     for (let mi = 0; mi < models.length; mi++) {
       if (hooks.shouldCancel?.()) throw new BacktestCancelled()
       const s = withUnitRandom(i, mi, () =>
-        stepPeriod(models[mi], lottery, train, target, nextDate, budget, profile)
+        collect
+          ? stepPeriodDetail(models[mi], lottery, train, target, i, nextDate, budget, profile)
+          : stepPeriod(models[mi], lottery, train, target, nextDate, budget, profile)
       )
-      if (s) applyStep(accums[mi].totals, s, accums[mi].equity)
+      if (s) {
+        applyStep(accums[mi].totals, s, accums[mi].equity)
+        // 收手变体：常规版照常累加，收手版只在还没收手时累加，命中二等奖及以上即锁定。
+        if (!accums[mi].stopped) {
+          addTotals(accums[mi].stopTotals, s)
+          if (isStopPrize(s.level)) {
+            accums[mi].stopped = true
+            accums[mi].stopIssue = target.issue
+            accums[mi].stopIndex = i
+            accums[mi].stopLevel = s.level
+          }
+        }
+        if (collect) chunks[mi].push(JSON.stringify(s))
+      }
       done++
       const t = now()
       if (t - sliceStart >= SLICE_MS) {
@@ -281,6 +348,14 @@ export async function runLeaderboardAsync(
         await yieldToUI()
         sliceStart = now()
       }
+    }
+  }
+
+  // 明细攒完了，一次性交给调用方落库（顺序与 models 一致，模型下标不变）
+  if (collect) {
+    for (let mi = 0; mi < models.length; mi++) {
+      hooks.onModelDetails?.(models[mi].meta.id, `[${chunks[mi].join(',')}]`)
+      chunks[mi] = []
     }
   }
 

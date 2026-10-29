@@ -40,7 +40,8 @@
     "cap:open": "npm run build && npx cap sync android && npx cap open android",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
-    "desktop:win": "tauri build --target x86_64-pc-windows-gnu"
+    "desktop:win": "tauri build --target x86_64-pc-windows-gnu",
+    "server": "node server/index.mjs"
   },
   "dependencies": {
     "@capacitor-community/sqlite": "^7.0.3",

@@ -59,6 +59,25 @@ body {
     @apply w-[18px] h-[18px] text-[9.5px] font-bold;
   }
 
+  /*
+   * 前区 / 后区组标签。
+   * 开奖行靠红蓝色还能分，但选号行是三态灰球（命中金 / 买中未用 / 买了没中），
+   * 复式票一旦前区十几个号、后区也十几个号，光看颜色根本分不出哪段是哪段。
+   * 所以两行都写明。
+   */
+  .grp-tag {
+    @apply text-[9px] shrink-0 px-1 rounded-sm leading-[15px] font-semibold;
+  }
+  .grp-front {
+    @apply text-red-300 bg-red-500/10;
+  }
+  .grp-back {
+    @apply text-sky-300 bg-sky-500/10;
+  }
+  .grp-sep {
+    @apply w-px h-3 bg-ink-500 shrink-0 mx-0.5 self-center;
+  }
+
   /* 逐期明细的三态号码球：命中 / 买下但没中 / 未买 */
   .pick-hit {
     background: radial-gradient(circle at 32% 28%, #ffd479, #f0932b);

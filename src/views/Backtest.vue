@@ -198,9 +198,34 @@
 
     <!-- 排行榜 -->
     <div class="card" v-if="store.board.length">
-      <div class="ct"><h3>模型排行榜</h3><span class="tag">按收益率</span></div>
+      <div class="ct">
+        <h3>模型排行榜</h3>
+        <!-- 开关自带标签就够了，不再另写一段说明 -->
+        <div class="ml-auto flex items-center gap-2">
+          <span
+            class="text-[10.5px]"
+            :class="stopMode ? 'text-slate-300' : 'text-slate-500'"
+            data-stop-label
+          >中二等奖即收手</span>
+          <button
+            type="button"
+            class="relative w-9 h-5 rounded-full transition shrink-0"
+            :class="stopMode ? 'bg-red-500' : 'bg-ink-500'"
+            :aria-pressed="stopMode"
+            :aria-label="'中二等奖及以上即收手'"
+            @click="stopMode = !stopMode"
+            data-stop-toggle
+            title="中二等奖及以上即收手：第一次中一等奖/二等奖就停手，净盈亏只算到中奖那期"
+          >
+            <span
+              class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform"
+              :class="stopMode ? 'translate-x-4' : ''"
+            ></span>
+          </button>
+        </div>
+      </div>
       <div
-        v-for="(r, i) in store.board"
+        v-for="(r, i) in view"
         :key="r.modelId"
         class="flex items-center gap-2.5 py-2 border-b border-ink-500 last:border-0"
         :class="r.modelId === 'B01' ? 'bg-amber-500/10 -mx-2 px-2 rounded-lg' : ''"
@@ -214,13 +239,32 @@
           {{ i + 1 }}
         </span>
         <div class="min-w-0 flex-1">
-          <div class="text-[12px] truncate">{{ r.modelName }}</div>
+          <div class="text-[12px] truncate">
+            {{ r.modelName }}
+            <span
+              v-if="r.showStopped"
+              class="ml-1 text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 align-middle"
+              data-stopped
+            >已收手</span>
+          </div>
           <div class="text-[9.5px] text-slate-500">
-            {{ r.modelId }} · {{ r.trials }} 期 · 中奖率 {{ (r.winRate * 100).toFixed(1) }}%
+            {{ r.modelId }} ·
+            <!-- 收手模式下「期数」就是真正掏钱买的期数，跟全程期数并排写清楚，
+                 否则同一个数字在两种模式下含义不同，很容易被当成同一个口径 -->
+            <span v-if="stopMode" data-buy-periods :title="buyPeriodsTitle(r)">
+              <span v-if="r.showStopped">已买 {{ r.trials }} / {{ boardPeriods }} 期</span>
+              <span v-else>买满 {{ r.trials }} 期</span>
+            </span>
+            <span v-else>{{ r.trials }} 期</span>
+            · 中奖率 {{ (r.winRate * 100).toFixed(1) }}%
             <span v-if="r.bestLevel" class="text-amber-400">
               · 最高 {{ levelName(r.bestLevel) }}
             </span>
             <span v-if="r.modelId === 'B01'" class="text-amber-400">· 黄金基线</span>
+            <span v-if="r.showStopped" class="text-emerald-400">
+              · 第 {{ r.stopIssue }} 期收手（{{ levelName(r.stopLevel) }}）
+            </span>
+            <span v-else-if="stopMode" class="text-slate-500">· 全程未中大奖</span>
           </div>
           <!-- 只有一个百分比看不出量级：把「投出去多少、收回来多少」也摆出来 -->
           <div class="text-[9.5px] text-slate-600" data-io>
@@ -253,8 +297,17 @@
       </div>
 
       <p class="text-[10.5px] text-slate-500 mt-2.5 leading-relaxed">
-        点任意一行的「明细」，弹框列出它每一期买了哪些号、哪几个中了 —— 按需现算，
-        与排行榜同一套选票逻辑，数字必然对得上。
+        点任意一行的「明细」，弹框列出它每一期买了哪些号、哪几个中了。
+        <template v-if="store.archiveInfo?.status === 'done'">
+          回测结束后已把全部 {{ store.archiveInfo.total }} 个模型的逐期明细存进本地库，点开直接读，不再现算。
+        </template>
+        <template v-else-if="store.archiveInfo?.status === 'running'">
+          回测已结束，正在把逐期明细存进本地库（{{ store.archiveInfo.done }}/{{ store.archiveInfo.total }}），
+          还没存到的模型会当场算一次并落库。
+        </template>
+        <template v-else>
+          回测结束后明细会自动存进本地库，点开直接读；还没存到的模型会当场算一次并落库。
+        </template>
       </p>
     </div>
 
@@ -275,19 +328,29 @@
         <div class="absolute inset-0 bg-black/70" @click="closeDetail"></div>
 
         <div
-          class="relative flex flex-col w-full sm:max-w-xl max-h-[88vh] rounded-t-2xl sm:rounded-2xl bg-ink-700 border border-ink-500 shadow-2xl overflow-hidden"
+          class="relative flex flex-col w-full sm:w-[44rem] sm:max-w-[calc(100vw-2rem)] max-h-[88vh] rounded-t-2xl sm:rounded-2xl bg-ink-700 border border-ink-500 shadow-2xl overflow-hidden"
           role="dialog"
           aria-modal="true"
           data-detail-panel
         >
           <!-- 头部不随内容滚动：模型名与「正在算哪一注」要一直在眼前 -->
           <div class="flex items-center gap-2 px-3.5 py-3 border-b border-ink-500 shrink-0">
-            <div class="min-w-0">
+            <div class="min-w-0 flex-1">
               <div class="text-[13px] font-semibold truncate">逐期明细</div>
               <div class="text-[10px] text-slate-500 truncate">
                 {{ detailModelName }} · {{ store.detailModelId }}
               </div>
             </div>
+            <span
+              class="tag shrink-0 border-emerald-500/40 text-emerald-400 bg-emerald-500/10"
+              v-if="store.detailFrom === 'disk' && !store.detailLoading"
+              data-detail-cached
+            >本地缓存</span>
+            <span
+              class="tag shrink-0 border-emerald-500/40 text-emerald-400 bg-emerald-500/10"
+              v-else-if="store.detailFrom === 'extend' && !store.detailLoading"
+              data-detail-cached
+            >缓存+补新期</span>
             <span class="tag ml-auto shrink-0" v-if="store.detailModelId && !store.detailLoading">
               {{ filterWin ? '只看得奖期' : '全部期数' }}
             </span>
@@ -311,7 +374,7 @@
 
       <template v-else>
         <!-- 汇总条 -->
-        <div v-if="detailStats.rows.length && !store.detailLoading" class="grid grid-cols-4 gap-1.5 mb-2.5">
+        <div v-if="detailStats.rows.length && !store.detailLoading" class="grid grid-cols-2 sm:grid-cols-4 gap-1.5 mb-2.5">
           <div class="kpi">
             <p>已结算</p>
             <b>{{ detailStats.rows.length }} 期</b>
@@ -328,8 +391,13 @@
           </div>
           <div class="kpi">
             <p>净盈亏</p>
-            <b :class="detailStats.net >= 0 ? 'text-red-400' : 'text-emerald-500'">
-              {{ detailStats.net >= 0 ? '+' : '' }}{{ detailStats.net }} 元
+            <!-- 七位数加变体符号在 4 列布局里会被折成「…元」换行，压字号 + 不换行 -->
+            <b
+              class="whitespace-nowrap text-[15px] sm:text-[16px]"
+              :class="detailStats.net >= 0 ? 'text-red-400' : 'text-emerald-500'"
+              :title="`${detailStats.net >= 0 ? '+' : ''}${detailStats.net} 元`"
+            >
+              {{ detailStats.net >= 0 ? '+' : '' }}{{ fmtInt(detailStats.net) }} 元
             </b>
           </div>
         </div>
@@ -408,8 +476,9 @@
             </div>
 
             <!-- 开奖号码 -->
-            <div class="flex items-center gap-1.5 mb-1">
+            <div class="flex items-center gap-1 flex-wrap mb-1">
               <span class="text-[9.5px] text-slate-500 w-8 shrink-0">开奖</span>
+              <span class="grp-tag grp-front">前</span>
               <span class="flex flex-wrap gap-0.5">
                 <span
                   v-for="n in drawOf(row).front"
@@ -417,6 +486,8 @@
                   class="ball ball-r ball-xs"
                 >{{ pad(n) }}</span>
               </span>
+              <span class="grp-sep"></span>
+              <span class="grp-tag grp-back">后</span>
               <span class="flex flex-wrap gap-0.5">
                 <span
                   v-for="n in drawOf(row).back"
@@ -427,8 +498,9 @@
             </div>
 
             <!-- 模型选号（命中高亮） -->
-            <div class="flex items-start gap-1.5">
+            <div class="flex items-start gap-1 flex-wrap">
               <span class="text-[9.5px] text-slate-500 w-8 shrink-0 pt-0.5">选号</span>
+              <span class="grp-tag grp-front mt-0.5">前</span>
               <span class="flex flex-wrap gap-0.5">
                 <span
                   v-for="n in row.hit.pickedFront"
@@ -438,6 +510,8 @@
                   :title="pickTitle(row, n)"
                 >{{ pad(n) }}</span>
               </span>
+              <span class="grp-sep mt-0.5"></span>
+              <span class="grp-tag grp-back mt-0.5">后</span>
               <span class="flex flex-wrap gap-0.5">
                 <span
                   v-for="n in row.hit.pickedBack"
@@ -501,6 +575,52 @@ import { estMs, fmtDur } from '../core/perf'
 
 const store = useMainStore()
 const lastCached = ref<boolean | null>(null)
+
+/**
+ * 「中二等奖及以上即收手」视图开关。
+ * 注意：它不是回测参数——回测正常算两套数据（常规 + 收手），这里只是切到哪套来显示，
+ * 纯前端变换、按收手后的收益率重排，不触发任何后端重算。
+ */
+const stopMode = ref(false)
+
+/**
+ * 排行榜展示用的「视图」：默认展示常规回测结果；
+ * 开启 stopMode 后改用每个模型已算好的收手变体，并按收手后收益率重新排序。
+ */
+const view = computed(() => {
+  const rows = store.board.map((r) => {
+    if (stopMode.value) {
+      return {
+        ...r,
+        roi: r.roiStop,
+        totalCost: r.totalCostStop,
+        totalPrize: r.totalPrizeStop,
+        trials: r.trialsStop,
+        winRate: r.winRateStop,
+        bestLevel: r.bestLevelStop,
+        hits: r.hitsStop,
+        showStopped: r.stopped,
+      }
+    }
+    return { ...r, showStopped: false }
+  })
+  rows.sort((a, b) => b.roi - a.roi)
+  return rows
+})
+
+/**
+ * 收手模式那行「期数」的悬停说明。
+ *
+ * 两种模式下 `r.trials` 的含义不同：常规模式是「回测算了多少期」，
+ * 收手模式是「真正掏钱买了多少期」。数字相同但口径不同，不写清楚必然被误读。
+ */
+function buyPeriodsTitle(r: { showStopped: boolean; trials: number; stopIssue: string | null }) {
+  const full = boardPeriods.value
+  if (r.showStopped) {
+    return `第 ${r.stopIssue} 期中二等奖及以上，此后不再买：实际买入 ${r.trials} 期，全程窗口 ${full} 期`
+  }
+  return `整段 ${full} 期都没中过二等奖及以上，所以一直买到窗口结束`
+}
 
 /**
  * 训练集期数。periods 由它推出：samples 之前的期只进训练，不结算。
@@ -698,6 +818,12 @@ function fmtYuan(v: number) {
 }
 
 const pct = (v: number) => (v * 100).toFixed(1) + '%'
+
+/** 千分位。净盈亏动辄七位数，不分位读起来一眼数不清 */
+function fmtInt(v: number) {
+  if (!Number.isFinite(v)) return '—'
+  return Math.round(v).toLocaleString('en-US')
+}
 
 // ------------------------------------------------------------ 逐期明细
 const FILTERS = [

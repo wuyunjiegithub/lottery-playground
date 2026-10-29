@@ -12,6 +12,7 @@
     "strict": false,
     "noUnusedLocals": false,
     "baseUrl": ".",
+    "types": ["vite/client"],
     "paths": { "@/*": ["src/*"] }
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]

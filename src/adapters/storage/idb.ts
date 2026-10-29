@@ -13,6 +13,7 @@
 import type { Draw, LotteryType } from '../../types'
 import {
   DEFAULT_USER_STATE,
+  type DetailCache,
   type StorageAdapter,
   type RunMeta,
   type SummaryRow,
@@ -20,11 +21,13 @@ import {
 } from './types'
 
 const DB_NAME = 'lottery_playground'
-const DB_VERSION = 1
+/** v2：新增 details（逐期明细懒缓存），老库在 upgradeneeded 里补建，数据不受影响 */
+const DB_VERSION = 2
 
 const S_DRAWS = 'draws'
 const S_RUNS = 'runs'
 const S_SUMMARY = 'summary'
+const S_DETAILS = 'details'
 const S_KV = 'kv'
 const K_USER = 'user_state'
 
@@ -51,6 +54,9 @@ function open(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(S_SUMMARY)) {
         db.createObjectStore(S_SUMMARY, { keyPath: 'pk' })
+      }
+      if (!db.objectStoreNames.contains(S_DETAILS)) {
+        db.createObjectStore(S_DETAILS, { keyPath: 'pk' })
       }
       if (!db.objectStoreNames.contains(S_KV)) {
         db.createObjectStore(S_KV, { keyPath: 'k' })
@@ -191,8 +197,14 @@ export const idbAdapter: StorageAdapter = {
   },
 
   async deleteRun(runKey: string): Promise<void> {
-    await run([S_RUNS, S_SUMMARY], 'readwrite', async (tx) => {
+    await run([S_RUNS, S_SUMMARY, S_DETAILS], 'readwrite', async (tx) => {
       tx.objectStore(S_RUNS).delete(runKey)
+      const dstore = tx.objectStore(S_DETAILS)
+      for (const k of await reqToPromise(
+        dstore.getAllKeys() as IDBRequest<IDBValidKey[]>
+      )) {
+        if (String(k).startsWith(`${runKey}:`)) dstore.delete(k)
+      }
       const store = tx.objectStore(S_SUMMARY)
       const keys = await reqToPromise(
         store.getAllKeys() as IDBRequest<IDBValidKey[]>
@@ -227,6 +239,25 @@ export const idbAdapter: StorageAdapter = {
       .sort((a, b) => (b.roi ?? 0) - (a.roi ?? 0))
   },
 
+  async getDetail(runKey: string, modelId: string): Promise<DetailCache | null> {
+    const r = await run(S_DETAILS, 'readonly', async (tx) => {
+      return reqToPromise(
+        tx.objectStore(S_DETAILS).get(summaryKey(runKey, modelId)) as IDBRequest<
+          DetailCache | undefined
+        >
+      )
+    })
+    return r || null
+  },
+
+  async putDetail(detail: DetailCache): Promise<void> {
+    await run(S_DETAILS, 'readwrite', async (tx) => {
+      tx.objectStore(S_DETAILS).put(
+        plain({ ...detail, pk: summaryKey(detail.runKey, detail.modelId) })
+      )
+    })
+  },
+
   async getUserState(): Promise<UserState> {
     const r = await run(S_KV, 'readonly', async (tx) => {
       return reqToPromise(
@@ -258,10 +289,11 @@ export const idbAdapter: StorageAdapter = {
   },
 
   async clearAll(): Promise<void> {
-    await run([S_DRAWS, S_RUNS, S_SUMMARY, S_KV], 'readwrite', async (tx) => {
+    await run([S_DRAWS, S_RUNS, S_SUMMARY, S_DETAILS, S_KV], 'readwrite', async (tx) => {
       tx.objectStore(S_DRAWS).clear()
       tx.objectStore(S_RUNS).clear()
       tx.objectStore(S_SUMMARY).clear()
+      tx.objectStore(S_DETAILS).clear()
       tx.objectStore(S_KV).clear()
     })
   },

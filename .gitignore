@@ -6,6 +6,7 @@ dist/
 dist-single/
 *.tsbuildinfo
 .vite/
+.npm-cache/
 src-tauri/target/
 src-tauri/gen/schemas/
 
@@ -29,3 +30,12 @@ Thumbs.db
 .vscode/
 .idea/
 .workbuddy/
+
+# 本地后端生成的 SQLite 数据库（首次启动自动灌入内置数据包）
+server/data/
+
+# 发布包 / 构建产物（体积大、可由源码重新生成，不进版本库）
+*.apk
+*.aab
+网页版-单文件版.html
+网页版-可部署/

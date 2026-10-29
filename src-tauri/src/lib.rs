@@ -104,6 +104,7 @@ fn migrations() -> Vec<tauri_plugin_sql::Migration> {
                 best_level  INTEGER,
                 hits        TEXT,
                 equity      TEXT,
+                stop_data   TEXT,
                 PRIMARY KEY (run_key, model_id)
             )"#,
             kind: MigrationKind::Up,
@@ -122,6 +123,30 @@ fn migrations() -> Vec<tauri_plugin_sql::Migration> {
             description: "create indexes",
             sql: r#"CREATE INDEX IF NOT EXISTS idx_draws_lottery ON draws(lottery, issue);
                     CREATE INDEX IF NOT EXISTS idx_summary_run ON summary(run_key, roi DESC)"#,
+            kind: MigrationKind::Up,
+        },
+        // v3 的 summary 表建好后才加「中二等奖及以上即收手」变体，
+        // 老库的 migration 记录已到 5，只能追加一条 ALTER 来补列
+        Migration {
+            version: 6,
+            description: "add summary.stop_data",
+            sql: r#"ALTER TABLE summary ADD COLUMN stop_data TEXT"#,
+            kind: MigrationKind::Up,
+        },
+        // 逐期明细懒缓存：只存用户点开过的模型，避免每次打开都现算二十秒
+        Migration {
+            version: 7,
+            description: "create details",
+            sql: r#"CREATE TABLE IF NOT EXISTS details (
+                run_key    TEXT NOT NULL,
+                model_id   TEXT NOT NULL,
+                start      INTEGER NOT NULL,
+                up_to      INTEGER NOT NULL,
+                engine     INTEGER NOT NULL,
+                rows       TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (run_key, model_id)
+            )"#,
             kind: MigrationKind::Up,
         },
     ]

@@ -10,7 +10,8 @@
  * 插件未编译进二进制时 isAvailable() 会失败，index.ts 自动降级到 IndexedDB。
  */
 import type { Draw, LotteryType } from '../../types'
-import type { RunMeta, StorageAdapter, SummaryRow, UserState } from './types'
+import type { DetailCache, RunMeta, StorageAdapter, SummaryRow, UserState } from './types'
+import { packStop, unpackStop } from './schema'
 
 const DB_URL = 'sqlite:lottery_playground.db'
 
@@ -134,6 +135,7 @@ export const adapter: StorageAdapter = {
     const c = await db()
     await c.execute('DELETE FROM runs WHERE run_key = $1', [runKey])
     await c.execute('DELETE FROM summary WHERE run_key = $1', [runKey])
+    await c.execute('DELETE FROM details WHERE run_key = $1', [runKey])
   },
 
   async putSummary(rows: SummaryRow[]): Promise<void> {
@@ -144,13 +146,14 @@ export const adapter: StorageAdapter = {
     }
     const sql = `INSERT INTO summary
         (run_key, model_id, model_name, category, trials, total_cost, total_prize,
-         roi, win_rate, best_level, hits, equity)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+         roi, win_rate, best_level, hits, equity, stop_data)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
     for (const r of rows) {
       await c.execute(sql, [
         r.runKey, r.modelId, r.modelName, r.category, r.trials,
         r.totalCost, r.totalPrize, r.roi, r.winRate, r.bestLevel,
         JSON.stringify(r.hits || {}), JSON.stringify(r.equity || []),
+        packStop(r),
       ])
     }
   },
@@ -161,10 +164,40 @@ export const adapter: StorageAdapter = {
       [runKey]
     )
     return rows.map((r) => ({
+      ...unpackStop(r.stop_data),
       ...r,
       hits: r.hits ? JSON.parse(r.hits) : {},
       equity: r.equity ? JSON.parse(r.equity) : [],
     })) as SummaryRow[]
+  },
+
+  async getDetail(runKey: string, modelId: string): Promise<DetailCache | null> {
+    const rows = await (await db()).select<Row[]>(
+      'SELECT * FROM details WHERE run_key = $1 AND model_id = $2',
+      [runKey, modelId]
+    )
+    const r = rows[0]
+    if (!r) return null
+    return {
+      runKey: r.run_key,
+      modelId: r.model_id,
+      start: r.start,
+      upTo: r.up_to,
+      engine: r.engine,
+      rows: r.rows ? JSON.parse(r.rows) : [],
+      createdAt: r.created_at,
+    }
+  },
+
+  async putDetail(d: DetailCache): Promise<void> {
+    await (await db()).execute(
+      `INSERT INTO details (run_key, model_id, start, up_to, engine, rows, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT(run_key, model_id) DO UPDATE SET
+         start = excluded.start, up_to = excluded.up_to, engine = excluded.engine,
+         rows = excluded.rows, created_at = excluded.created_at`,
+      [d.runKey, d.modelId, d.start, d.upTo, d.engine, JSON.stringify(d.rows || []), d.createdAt]
+    )
   },
 
   async getUserState(): Promise<UserState> {
@@ -199,6 +232,7 @@ export const adapter: StorageAdapter = {
     await c.execute('DELETE FROM draws')
     await c.execute('DELETE FROM runs')
     await c.execute('DELETE FROM summary')
+    await c.execute('DELETE FROM details')
     await c.execute('DELETE FROM kv')
   },
 }

@@ -7,7 +7,8 @@
  * 插件未安装或未完成 npm/i 时 isAvailable() 返回 false，
  * index.ts 自动降级到 IndexedDB，网页端行为不受影响。
  */
-import type { RunMeta, SummaryRow, UserState } from './types'
+import type { DetailCache, RunMeta, SummaryRow, UserState } from './types'
+import { packStop, unpackStop } from './schema'
 import type { Draw, LotteryType } from '../../types'
 
 const DB_NAME = 'lottery_playground'
@@ -47,6 +48,38 @@ export async function isAvailable(): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/**
+ * 老库补列：`stop_data` 是后加的（见 schema.ts 的 ALTER_COLUMNS）。
+ * SQLite 的 ADD COLUMN 没有 IF NOT EXISTS，重复执行会报错，所以只试一次并吞掉异常。
+ */
+let stopColumnEnsured = false
+async function ensureStopColumn(): Promise<void> {
+  if (stopColumnEnsured) return
+  stopColumnEnsured = true
+  try {
+    await execute('ALTER TABLE summary ADD COLUMN stop_data TEXT')
+  } catch {
+    // 已经有了
+  }
+}
+
+/** 明细表是本轮新加的，安卓端没有 Rust 那种迁移，写入前补建一次 */
+let detailTableEnsured = false
+async function ensureDetailTable(): Promise<void> {
+  if (detailTableEnsured) return
+  detailTableEnsured = true
+  await execute(`CREATE TABLE IF NOT EXISTS details (
+     run_key    TEXT NOT NULL,
+     model_id   TEXT NOT NULL,
+     start      INTEGER NOT NULL,
+     up_to      INTEGER NOT NULL,
+     engine     INTEGER NOT NULL,
+     rows       TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     PRIMARY KEY (run_key, model_id)
+   )`)
 }
 
 const toDraw = (r: any): Draw => ({
@@ -120,22 +153,24 @@ export const capacitorAdapter = {
   },
 
   deleteRun(runKey: string): Promise<void> {
-    return execute('DELETE FROM runs WHERE run_key = ?', [runKey]).then(() =>
-      execute('DELETE FROM summary WHERE run_key = ?', [runKey])
-    )
+    return execute('DELETE FROM runs WHERE run_key = ?', [runKey]).then(async () => {
+      await execute('DELETE FROM summary WHERE run_key = ?', [runKey])
+      await execute('DELETE FROM details WHERE run_key = ?', [runKey])
+    })
   },
 
   async putSummary(rows: SummaryRow[]): Promise<void> {
+    await ensureStopColumn()
     const runKeys = [...new Set(rows.map((r) => r.runKey))]
     for (const k of runKeys) await execute('DELETE FROM summary WHERE run_key = ?', [k])
     for (const r of rows) {
       await execute(
         `INSERT INTO summary (run_key, model_id, model_name, category, trials,
-           total_cost, total_prize, roi, win_rate, best_level, hits, equity)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           total_cost, total_prize, roi, win_rate, best_level, hits, equity, stop_data)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [r.runKey, r.modelId, r.modelName, r.category, r.trials, r.totalCost,
          r.totalPrize, r.roi, r.winRate, r.bestLevel,
-         JSON.stringify(r.hits || {}), JSON.stringify(r.equity || [])]
+         JSON.stringify(r.hits || {}), JSON.stringify(r.equity || []), packStop(r)]
       )
     }
   },
@@ -144,11 +179,43 @@ export const capacitorAdapter = {
     return query<any>('SELECT * FROM summary WHERE run_key = ? ORDER BY roi DESC', [runKey])
       .then((rs) =>
         rs.map((r) => ({
+          ...unpackStop(r.stop_data),
           ...r,
           hits: r.hits ? JSON.parse(r.hits) : {},
           equity: r.equity ? JSON.parse(r.equity) : [],
         }))
       )
+  },
+
+  getDetail(runKey: string, modelId: string): Promise<DetailCache | null> {
+    return query<any>('SELECT * FROM details WHERE run_key = ? AND model_id = ?', [
+      runKey,
+      modelId,
+    ]).then((rs) => {
+      const r = rs[0]
+      if (!r) return null
+      return {
+        runKey: r.run_key,
+        modelId: r.model_id,
+        start: r.start,
+        upTo: r.up_to,
+        engine: r.engine,
+        rows: r.rows ? JSON.parse(r.rows) : [],
+        createdAt: r.created_at,
+      } as DetailCache
+    })
+  },
+
+  async putDetail(d: DetailCache): Promise<void> {
+    await ensureDetailTable()
+    await execute(
+      `INSERT INTO details (run_key, model_id, start, up_to, engine, rows, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(run_key, model_id) DO UPDATE SET
+         start = excluded.start, up_to = excluded.up_to, engine = excluded.engine,
+         rows = excluded.rows, created_at = excluded.created_at`,
+      [d.runKey, d.modelId, d.start, d.upTo, d.engine, JSON.stringify(d.rows || []), d.createdAt]
+    )
   },
 
   getUserState(): Promise<UserState> {
@@ -179,6 +246,7 @@ export const capacitorAdapter = {
     await execute('DELETE FROM draws')
     await execute('DELETE FROM runs')
     await execute('DELETE FROM summary')
+    await execute('DELETE FROM details')
     await execute('DELETE FROM kv')
   },
 }

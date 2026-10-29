@@ -6,17 +6,49 @@
         <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_7px] shadow-emerald-500"></span>
         第 <b class="text-slate-300">{{ store.latest.issue }}</b> 期 · 已开奖
         {{ store.latest.date }}
+        <button
+          class="ml-auto shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] border transition disabled:opacity-60"
+          :class="
+            store.canLive
+              ? 'border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10'
+              : 'border-ink-500 text-slate-500 hover:text-slate-300'
+          "
+          :disabled="store.updating"
+          :title="store.modeText"
+          @click="onUpdate"
+        >
+          <svg
+            width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
+            :class="store.updating ? 'animate-spin' : ''"
+          >
+            <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+            <path d="M21 3v6h-6" />
+          </svg>
+          {{ store.updating ? '更新中' : '更新数据' }}
+        </button>
       </div>
-      <div class="flex gap-1.5 items-center flex-wrap mb-3">
+      <div class="flex gap-1 items-center flex-wrap mb-3">
+        <span class="grp-tag grp-front">前区</span>
         <span v-for="n in store.latest.front" :key="'f' + n" class="ball ball-r">{{ pad(n) }}</span>
-        <span class="w-px h-5 bg-ink-500 mx-1"></span>
+        <span class="grp-sep"></span>
+        <span class="grp-tag grp-back">后区</span>
         <span v-for="n in store.latest.back" :key="'b' + n" class="ball ball-b">{{ pad(n) }}</span>
       </div>
       <div class="flex gap-4 text-[11px] text-slate-400 flex-wrap">
         <span v-if="store.latest.sales">销售额 <b class="text-slate-200">{{ yi(store.latest.sales) }}</b></span>
         <span v-if="store.latest.pool">奖池 <b class="text-slate-200">{{ yi(store.latest.pool) }}</b></span>
         <span>共 <b class="text-slate-200">{{ store.history.length }}</b> 期在库</span>
+        <span v-if="dataCutoff" :class="stale ? 'text-amber-400' : ''">
+          数据截止 <b :class="stale ? 'text-amber-400' : 'text-slate-200'">{{ dataCutoff }}</b>
+          <template v-if="stale">（已 {{ staleDays }} 天未更新）</template>
+        </span>
       </div>
+      <div
+        v-if="tip"
+        class="mt-2 text-[10.5px] leading-relaxed"
+        :class="tipBad ? 'text-rose-400' : 'text-emerald-400'"
+      >{{ tip }}</div>
     </div>
 
     <!-- 下一期 -->
@@ -93,7 +125,8 @@
       </div>
 
       <template v-if="plan?.best">
-        <div class="flex gap-1.5 items-center flex-wrap mb-2">
+        <div class="flex gap-1 items-center flex-wrap mb-2">
+          <span class="grp-tag grp-front">前区</span>
           <template v-if="plan.best.dans?.length">
             <span class="text-[10px] text-slate-500 mr-0.5">胆</span>
             <span v-for="n in plan.best.dans" :key="'d' + n" class="ball ball-r">{{ pad(n) }}</span>
@@ -104,7 +137,8 @@
           <template v-else>
             <span v-for="n in plan.best.frontNums" :key="'f' + n" class="ball ball-r">{{ pad(n) }}</span>
           </template>
-          <span class="w-px h-5 bg-ink-500 mx-1"></span>
+          <span class="grp-sep"></span>
+          <span class="grp-tag grp-back">后区</span>
           <span v-for="n in plan.best.backNums" :key="'b' + n" class="ball ball-b">{{ pad(n) }}</span>
         </div>
 
@@ -148,7 +182,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useMainStore } from '../stores/main'
 import { formatDrawDate } from '../core/format'
 import { ALL_MODELS } from '../core/models'
@@ -255,10 +289,37 @@ const evTitle = computed(
   () => `${rule.value.name}单注期望回报按官方奖金表折算；一、二等奖为浮动奖，取历史均值估算`
 )
 function yi(v: string | number) {
-  const n = Number(v)
+  // 体彩返回的销售额带千分位逗号（"289,057,331"），Number() 会直接得到 NaN。
+  // 老数据包里已经存了带逗号的历史记录，所以这里必须兜住，不能只靠抓取端清洗。
+  const n = Number(typeof v === 'string' ? v.replace(/,/g, '') : v)
   if (!n) return '—'
   return n >= 1e8 ? (n / 1e8).toFixed(2) + ' 亿' : (n / 1e4).toFixed(0) + ' 万'
 }
+
+// —— 更新最新开奖数据 ——
+const tip = ref('')
+const tipBad = ref(false)
+async function onUpdate() {
+  tip.value = ''
+  const r = await store.updateData()
+  tipBad.value = !r.ok
+  tip.value = r.msg
+}
+watch(() => store.lottery, () => (tip.value = ''))
+
+/** 数据截止日期：不显示它，用户会拿一个月前的数据算「下一期票面」而不自知 */
+const dataCutoff = computed(() => store.latest?.date || '')
+const staleDays = computed(() => {
+  const d = dataCutoff.value
+  if (!d) return -1
+  const t = new Date(d + 'T00:00:00')
+  if (Number.isNaN(t.getTime())) return -1
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return Math.max(0, Math.round((today.getTime() - t.getTime()) / 86400000))
+})
+/** 两个彩种都是一周开三次，超过 4 天没新数据一定是漏了 */
+const stale = computed(() => staleDays.value > 4)
 
 const cdText = ref('—')
 const nextDrawAt = computed(() => formatDrawDate(store.nextDate))

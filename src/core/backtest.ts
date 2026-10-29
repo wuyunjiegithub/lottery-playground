@@ -16,6 +16,23 @@ export interface BacktestResult {
   bestLevel: number
   winRate: number
   equity: number[]
+  // ---- 「中二等奖及以上即收手」变体：引擎一次算两套，结果区可即时切换，无需重跑 ----
+  /** 是否曾在某期命中二等奖及以上（即「若收手则会在此收手」） */
+  stopped: boolean
+  /** 收手时所在期号（中奖那一期）；从未中大奖则为 null */
+  stopIssue: string | null
+  /** 收手时的历史下标 */
+  stopIndex: number | null
+  /** 触发收手的奖级（1=一等奖，2=二等奖） */
+  stopLevel: number | null
+  /** 收手变体的逐期累计（只算到第一次中二等奖及以上那期；从未中则为空累计） */
+  trialsStop: number
+  totalCostStop: number
+  totalPrizeStop: number
+  roiStop: number
+  winRateStop: number
+  bestLevelStop: number
+  hitsStop: Record<number, number>
 }
 
 export interface BacktestOptions {
@@ -296,13 +313,16 @@ export function applyStep(t: RunningTotals, s: PeriodStep, equity: number[]): vo
   equity.push(Math.round(t.totalPrize - t.totalCost))
 }
 
-/** 账本 + 净值序列 -> 排行榜的一行 */
+/** 账本 + 净值序列 -> 排行榜的一行（同时产出常规版与「收手」变体） */
 export function toResult(
   meta: { id: string; name: string; category: string },
   t: RunningTotals,
-  equity: number[]
+  equity: number[],
+  stopT: RunningTotals,
+  stop: { stopped: boolean; stopIssue: string | null; stopIndex: number | null; stopLevel: number | null }
 ): BacktestResult {
   const winTimes = Object.values(t.hits).reduce((a, b) => a + b, 0)
+  const stopWin = Object.values(stopT.hits).reduce((a, b) => a + b, 0)
   return {
     modelId: meta.id,
     modelName: meta.name,
@@ -315,7 +335,26 @@ export function toResult(
     bestLevel: t.bestLevel,
     winRate: t.trials ? winTimes / t.trials : 0,
     equity,
+    stopped: stop.stopped,
+    stopIssue: stop.stopIssue,
+    stopIndex: stop.stopIndex,
+    stopLevel: stop.stopLevel,
+    trialsStop: stopT.trials,
+    totalCostStop: stopT.totalCost,
+    totalPrizeStop: stopT.totalPrize,
+    roiStop: stopT.totalCost ? (stopT.totalPrize - stopT.totalCost) / stopT.totalCost : 0,
+    winRateStop: stopT.trials ? stopWin / stopT.trials : 0,
+    bestLevelStop: stopT.bestLevel,
+    hitsStop: stopT.hits,
   }
+}
+
+/**
+ * 奖级是否触发「中大奖即收手」：一等奖(1)或二等奖(2)都算。
+ * 数字越小奖越大（bestLevel 注释里写了），所以「二等奖及以上」= level ∈ {1, 2}。
+ */
+export function isStopPrize(level: number): boolean {
+  return level > 0 && level <= 2
 }
 
 /** 单模型回测（同步版，脚本与单模型推演用） */
@@ -326,13 +365,34 @@ export function backtest(model: Model, opts: BacktestOptions): BacktestResult {
 
   const dates = resolveDrawDates(history)
   const totals = emptyTotals()
+  const stopTotals = emptyTotals()
   const equity: number[] = []
+  let stopIssue: string | null = null
+  let stopIndex: number | null = null
+  let stopLevel: number | null = null
+  let stopped = false
   for (let i = start; i < end; i++) {
     const s = stepPeriod(model, lottery, history.slice(0, i), history[i], dates[i], budget, profile)
     if (!s) continue
     applyStep(totals, s, equity)
+    // 收手变体：第一次中二等奖及以上就停。与常规版共用同一套选票/奖级，只是不再累加。
+    if (!stopped) {
+      addTotals(stopTotals, s)
+      if (isStopPrize(s.level)) {
+        stopped = true
+        stopIssue = history[i].issue
+        stopIndex = i
+        stopLevel = s.level
+      }
+    }
   }
-  return toResult(model.meta, totals, equity)
+  return toResult(
+    model.meta,
+    totals,
+    equity,
+    stopTotals,
+    { stopped, stopIssue, stopIndex, stopLevel }
+  )
 }
 
 /**
