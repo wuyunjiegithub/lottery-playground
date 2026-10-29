@@ -147,6 +147,10 @@
           本次启动已自动拉取最新数据，新增 {{ store.dataAdded }} 期。
         </div>
 
+        <div v-if="plan.stale && !busy" class="mt-1 text-amber-400">
+          检测到新开奖（新增 {{ plan.extend }} 期），正在自动并入回测记录，无需手动点击。
+        </div>
+
         <div v-if="plan.mode === 'cache'" class="mt-1 text-emerald-500" data-plan-cache>
           这套设置已经算到第 {{ plan.upTo }} 期且历史没有更新，点一下直接读本地库，秒开。
         </div>
@@ -712,25 +716,52 @@ watch(
 )
 
 /** 当前设置下的缓存判定：秒开 / 补算 / 重算。与 store 内部同源，不会出现按钮与实际行为不一致 */
-const plan = ref<{ mode: 'cache' | 'extend' | 'full'; upTo: number; extend: number; periods: number }>(
-  { mode: 'full', upTo: 0, extend: 0, periods: 0 }
-)
+const plan = ref<{
+  mode: 'cache' | 'extend' | 'full'
+  upTo: number
+  extend: number
+  periods: number
+  /** 后端榜面已算过、但历史又新增了开奖，需要自动重算把新期并入记录 */
+  stale?: boolean
+}>(({ mode: 'full', upTo: 0, extend: 0, periods: 0 }))
+
+/**
+ * 自动续写闸门：检测到「本地缓存可增量补算」或「后端榜面已落后最新一期」时，
+ * 不等用户点按钮，直接触发一次重算/补算并把新开奖并入回测记录。
+ * key 锁避免同一批数据重复触发（run() 结束时还会再刷一次 plan）。
+ */
+const autoRanFor = ref('')
+function maybeAutoRun() {
+  const p = plan.value
+  const shouldAuto = (p.mode === 'extend' || p.stale) && !store.backtesting
+  if (!shouldAuto) {
+    autoRanFor.value = ''
+    return
+  }
+  const key = `${store.lottery}|${store.budget}|${periods.value}|${total.value}`
+  if (autoRanFor.value === key) return
+  autoRanFor.value = key
+  void run(false)
+}
 
 async function refreshPlan() {
   try {
     const p = await store.probeBoard(periods.value)
-    plan.value = !p.has
-      ? { mode: 'full', upTo: 0, extend: 0, periods: p.periods }
-      : p.extend > 0
-        ? { mode: 'extend', upTo: p.upTo, extend: p.extend, periods: p.periods }
-        : { mode: 'cache', upTo: p.upTo, extend: 0, periods: p.periods }
+    plan.value = {
+      mode: p.stale ? 'full' : !p.has ? 'full' : p.extend > 0 ? 'extend' : 'cache',
+      upTo: p.upTo,
+      extend: p.extend,
+      periods: p.periods,
+      stale: !!p.stale,
+    }
   } catch {
     plan.value = { mode: 'full', upTo: 0, extend: 0, periods: 0 }
   }
+  maybeAutoRun()
 }
 
 watch(
-  [() => store.lottery, () => store.budget, periods, () => store.boardInfo],
+  [() => store.lottery, () => store.budget, periods, () => store.boardInfo, () => store.dataAdded],
   () => {
     lastCached.value = null
     void refreshPlan()

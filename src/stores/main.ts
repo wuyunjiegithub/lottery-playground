@@ -891,7 +891,7 @@ export const useMainStore = defineStore('main', () => {
    */
   async function probeBoard(
     periods = 80
-  ): Promise<{ has: boolean; upTo: number; extend: number; periods: number }> {
+  ): Promise<{ has: boolean; upTo: number; extend: number; periods: number; stale?: boolean }> {
     const none = { has: false, upTo: 0, extend: 0, periods: 0 }
     if (!history.value.length) return none
     const total = history.value.length
@@ -914,6 +914,29 @@ export const useMainStore = defineStore('main', () => {
         // 浏览器里没锚点，但后端可能已经算过这套设置（它写的是自己的 server_board）
         if (await serverBoardHit(st, runKey, total, periods)) {
           return { has: true, upTo: total, extend: 0, periods: Math.max(0, total - start) }
+        }
+        // 后端算过、但历史又新增了开奖（server_board.upTo 落后于最新一期）：
+        // 旧榜面已失效，需要重算。标记 stale，让 UI 自动触发一次重算把新期并入记录，
+        // 不必等人手动点「开始回测」。
+        if (isServerLive()) {
+          const meta = await st.getKV<{ upTo?: number; periods?: number; engine?: number }>(
+            `server_board:${runKey}`
+          )
+          if (
+            meta &&
+            meta.engine === ENGINE_VERSION &&
+            meta.periods === periods &&
+            typeof meta.upTo === 'number' &&
+            meta.upTo < total
+          ) {
+            return {
+              has: true,
+              upTo: meta.upTo,
+              extend: total - meta.upTo,
+              periods: Math.max(0, total - start),
+              stale: true,
+            }
+          }
         }
         return none
       }
